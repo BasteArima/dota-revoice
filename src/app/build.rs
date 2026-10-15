@@ -280,7 +280,12 @@ impl App {
                 };
                 self.step_install(ui, &ctx, &snap, install_state);
                 ui.add_space(10.0);
-                self.step_launch(ui, &snap, current, state(3));
+                // Запустить Доту можно в любой момент — шаг не тускнеет, даже если до него не дошли.
+                let launch_state = match state(3) {
+                    StepState::Later => StepState::Ready,
+                    s => s,
+                };
+                self.step_launch(ui, &snap, current, launch_state);
                 ui.add_space(22.0);
                 self.exchange_card(ui);
             });
