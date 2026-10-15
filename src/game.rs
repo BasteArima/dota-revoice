@@ -105,10 +105,14 @@ fn steam_root() -> Option<PathBuf> {
     Some(PathBuf::from(home).join("Library/Application Support/Steam"))
 }
 
+/// Linux: обычный Steam, его символическая ссылка и Steam из Flatpak.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn steam_root() -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
-    [".steam/steam", ".local/share/Steam"].into_iter().map(|p| home.join(p)).find(|p| p.is_dir())
+    [".steam/steam", ".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"]
+        .into_iter()
+        .map(|p| home.join(p))
+        .find(|p| p.join("steamapps").is_dir())
 }
 
 #[cfg(test)]

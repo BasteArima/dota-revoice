@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Dota Revoice
+Comment=Переозвучка героев Dota 2
+Comment[en]=Re-voice Dota 2 heroes
+# Если положить программу в другое место — поправь путь.
+Exec=dota-revoice
+Terminal=false
+Categories=AudioVideo;Audio;Game;

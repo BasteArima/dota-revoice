@@ -71,6 +71,8 @@ cargo run --bin vsnd_spike -- [--base <pak01_dir.vpk>] out.vpk sounds/vo/<hero>/
 
 ## Договорённости
 
+- Лицензия проекта — GPL-3.0-only (`LICENSE`); новые зависимости должны быть с ней совместимы.
+
 - Изменения в папке игры (копирование паков, переименование файлов Valve) — только
   после явного «да» пользователя на конкретное действие.
 - В коммитах, PR и тегах — никаких `Co-Authored-By` и упоминаний Claude.
@@ -91,8 +93,9 @@ cargo run --bin vsnd_spike -- [--base <pak01_dir.vpk>] out.vpk sounds/vo/<hero>/
    Доты через Steam, ✅ баннер «Steam вернул озвучку Valve» и «английская озвучка»
    (перепроверка игры раз в 5 с, `install::check`), ✅ пересборка, если пак Valve новее
    собранного (Steam ставит новое время файла при обновлении, переименование его хранит).
-5. Этап 4: ✅ CI (`.github/workflows/ci.yml`: тесты + clippy на Windows/macOS),
-   ✅ релизы по тегу `v*` (`release.yml`: zip с exe, универсальный .app с разрешением
+5. Этап 4: ✅ CI (`.github/workflows/ci.yml`: тесты + clippy на Windows/macOS/Linux),
+   ✅ релизы по тегу `v*` (`release.yml`: zip с exe, tar.gz для Linux (Ubuntu 22.04,
+   ALSA), универсальный .app с разрешением
    на микрофон из `packaging/macos/Info.plist`; тег обязан совпадать с версией в
    Cargo.toml), ✅ обмен пачками фраз (`exchange.rs`, zip с mp3 и заметками),
    ✅ уведомление о новой версии (`update.rs`, GitHub API, без самообновления),

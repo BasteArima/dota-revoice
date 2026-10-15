@@ -27,6 +27,12 @@
 При первом запуске: правый клик по программе → «Открыть» → «Открыть» (она тоже без
 сертификата Apple). Когда попросит доступ к микрофону — разреши.
 
+**Linux.** Распакуй `DotaRevoice-…-linux-x64.tar.gz` и запусти `./dota-revoice`.
+Нужна ALSA (`libasound2`) — на обычном десктопе она уже есть; PipeWire и PulseAudio
+работают через неё. Steam находится и обычный, и из Flatpak. Для меню приложений
+рядом лежит `dota-revoice.desktop` — поправь в нём путь и положи в
+`~/.local/share/applications/`.
+
 Новые версии программа находит сама: сверху появится «Вышла новая версия» со ссылкой.
 
 ## Как пользоваться
@@ -85,13 +91,20 @@
 
 ## Сборка из исходников
 
-Нужен [Rust](https://rustup.rs/) (stable). На macOS — ещё Xcode Command Line Tools.
+Нужен [Rust](https://rustup.rs/) (stable). На macOS — ещё Xcode Command Line Tools,
+на Linux — `libasound2-dev` и `pkg-config` (Debian/Ubuntu: `sudo apt install libasound2-dev pkg-config`).
 
 ```bash
 cargo run --release
 ```
 
 Тесты: `cargo test`. Подробности об устройстве кода — в [AGENTS.md](AGENTS.md).
+
+## Лицензия
+
+Dota Revoice распространяется по лицензии [GNU GPL v3](LICENSE): программу можно
+свободно использовать, изучать, менять и распространять, но изменённые версии тоже
+должны оставаться открытыми под GPL v3.
 
 ## Лицензии сторонних компонентов
 
@@ -109,7 +122,8 @@ cargo run --release
 | [hound](https://github.com/ruuda/hound) | wav | Apache-2.0 |
 | [zip](https://github.com/zip-rs/zip2), [ureq](https://github.com/algesten/ureq) | пачки фраз, проверка обновлений | MIT, MIT / Apache-2.0 |
 
-LAME собирается в программу статически. Исходный код программы открыт, поэтому её
-можно пересобрать с другой версией LAME — этого требует LGPL.
+Все эти лицензии совместимы с GPL v3. LAME собирается в программу статически;
+исходный код программы открыт, поэтому её можно пересобрать с другой версией LAME —
+этого требует LGPL.
 
 Озвучка Dota 2 принадлежит Valve; в репозиторий она не входит и в релизы не попадает.

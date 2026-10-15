@@ -1,4 +1,4 @@
-# Проверка на каждый пуш и PR: тесты и clippy на Windows и macOS.
+# Проверка на каждый пуш и PR: тесты и clippy на Windows, macOS и Linux.
 name: CI
 
 on:
@@ -11,10 +11,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Библиотеки Linux (ALSA для звука)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

@@ -1,4 +1,4 @@
-# Релиз по тегу v*: zip с exe для Windows и универсальный .app для macOS.
+# Релиз по тегу v*: zip с exe для Windows, универсальный .app для macOS, tar.gz для Linux.
 # Версия в теге должна совпадать с version в Cargo.toml — по ней программа
 # понимает, что вышло обновление.
 name: Release
@@ -29,7 +29,7 @@ jobs:
         run: |
           New-Item -ItemType Directory dist/DotaRevoice | Out-Null
           Copy-Item target/release/dota_revoice.exe dist/DotaRevoice/DotaRevoice.exe
-          Copy-Item README.md dist/DotaRevoice/
+          Copy-Item README.md, LICENSE dist/DotaRevoice/
           Compress-Archive -Path dist/DotaRevoice -DestinationPath "DotaRevoice-$env:GITHUB_REF_NAME-windows-x64.zip"
       - uses: actions/upload-artifact@v4
         with:
@@ -57,6 +57,8 @@ jobs:
             target/aarch64-apple-darwin/release/dota_revoice \
             target/x86_64-apple-darwin/release/dota_revoice
           sed "s/__VERSION__/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          mkdir -p "$app/Contents/Resources"
+          cp LICENSE "$app/Contents/Resources/"
           # Подпись без сертификата: без неё macOS не запомнит разрешение на микрофон.
           codesign --force --deep --sign - "$app"
           ditto -c -k --keepParent "$app" "DotaRevoice-$GITHUB_REF_NAME-macos.zip"
@@ -65,8 +67,32 @@ jobs:
           name: macos
           path: DotaRevoice-*-macos.zip
 
+  linux:
+    # 22.04 — старый glibc: бинарник запустится на большинстве дистрибутивов.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Библиотеки (ALSA для звука)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Сборка
+        run: cargo build --release --bin dota_revoice
+      - name: Упаковка
+        run: |
+          dir=dist/DotaRevoice
+          mkdir -p "$dir"
+          cp target/release/dota_revoice "$dir/dota-revoice"
+          strip "$dir/dota-revoice"
+          cp README.md LICENSE packaging/linux/dota-revoice.desktop "$dir/"
+          tar -C dist -czf "DotaRevoice-$GITHUB_REF_NAME-linux-x64.tar.gz" DotaRevoice
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: DotaRevoice-*-linux-x64.tar.gz
+
   release:
-    needs: [windows, macos]
+    needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -76,7 +102,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" DotaRevoice-*.zip \
+          gh release create "$GITHUB_REF_NAME" DotaRevoice-*.zip DotaRevoice-*.tar.gz \
             --repo "$GITHUB_REPOSITORY" \
             --title "Dota Revoice $GITHUB_REF_NAME" \
             --generate-notes
