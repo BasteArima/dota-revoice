@@ -158,9 +158,30 @@ pub fn build(resource_path: &str, mp3: &Mp3Stream) -> Vec<u8> {
     out
 }
 
+/// mp3-поток из `.vsnd_c` игры: всё после заголовка. Поле формата в DATA у новых
+/// ресурсов (RED2 + CTRL) устроено иначе, поэтому mp3 узнаём по самому потоку.
+pub fn mp3_of(vsnd_c: &[u8]) -> anyhow::Result<&[u8]> {
+    let header = vsnd_c.get(..4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    let stream = header.and_then(|h| vsnd_c.get(h..)).filter(|s| !s.is_empty());
+    let Some(stream) = stream else { anyhow::bail!("в звуке нет аудиопотока") };
+    let mp3 = stream.starts_with(b"ID3") || (stream.len() > 1 && stream[0] == 0xFF && stream[1] & 0xE0 == 0xE0);
+    anyhow::ensure!(mp3, "звук не в mp3");
+    Ok(stream)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mp3_back_out_of_vsnd() {
+        let mut data = vec![0xFF, 0xFB, 0x50, 0xC4];
+        data.resize(500, 0x55);
+        let mp3 = Mp3Stream { sample_rate: 44100, channels: 1, samples_per_frame: 1152, frame_count: 1, data };
+        let f = build("sounds/vo/axe/axe_kill_01", &mp3);
+        assert_eq!(mp3_of(&f).unwrap(), mp3.data.as_slice());
+        assert!(mp3_of(&f[..f.len() - 500]).is_err(), "без потока");
+    }
 
     fn u32_at(b: &[u8], at: usize) -> u32 {
         u32::from_le_bytes(b[at..at + 4].try_into().unwrap())

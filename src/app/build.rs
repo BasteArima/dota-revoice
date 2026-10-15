@@ -142,7 +142,14 @@ impl App {
                         s.size_bytes as f64 / 1_048_576.0
                     );
                     if !s.not_in_base.is_empty() {
-                        text += &format!(". В озвучке игры нет: {} — проверь имена", s.not_in_base.join(", "));
+                        // Обычно это герои без озвучки на этом языке: их фразы лягут поверх английских.
+                        let first: Vec<&str> = s.not_in_base.iter().take(3).map(String::as_str).collect();
+                        let more = if s.not_in_base.len() > 3 { " …" } else { "" };
+                        text += &format!(
+                            ". Не из этой озвучки: {} ({}{more}) — у таких героев твои фразы заменят английские",
+                            s.not_in_base.len(),
+                            first.join(", ")
+                        );
                     }
                     Ok(text)
                 }

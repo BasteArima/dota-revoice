@@ -12,7 +12,7 @@
 //! example/export/dota_revoice.json                          ← обрезка, обработка, заметки
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -298,7 +298,7 @@ impl Project {
         let hero = resource_dir.rsplit('/').next().unwrap_or_default().to_owned();
 
         let names: Vec<String> = files.iter().map(|p| file_stem(p)).collect();
-        let prefix = common_prefix(&names);
+        let prefix = main_prefix(&names);
         let lines = files
             .into_iter()
             .zip(names)
@@ -449,27 +449,50 @@ fn locate(source_dir: &Path) -> (String, PathBuf) {
     (format!("sounds/vo/{hero}"), root)
 }
 
-/// Префикс героя (`bount_`), если он общий у всех файлов.
-fn common_prefix(names: &[String]) -> String {
-    let first = names.first().and_then(|n| n.split_once('_')).map(|(p, _)| format!("{p}_"));
-    match first {
-        Some(p) if names.iter().all(|n| n.starts_with(&p)) => p,
-        _ => String::new(),
+/// Префикс героя (`bount_`): самый частый первый кусок имени. `auto_` не в счёт —
+/// это вторые версии фраз (`auto_axe_kill_01`), а не другой герой.
+fn main_prefix(names: &[String]) -> String {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for n in names {
+        let n = n.strip_prefix("auto_").unwrap_or(n);
+        if let Some((p, _)) = n.split_once('_') {
+            *counts.entry(p).or_default() += 1;
+        }
     }
+    counts.into_iter().max_by_key(|&(p, n)| (n, std::cmp::Reverse(p))).map(|(p, _)| format!("{p}_")).unwrap_or_default()
 }
 
-/// `bount_ability_track_kill_03` → `ability_track_kill`.
+/// `bount_ability_track_kill_03` → `ability_track_kill`. Фразы с другим началом — в свои
+/// группы: `auto_axe_kill_01` → `auto/kill`, `jung_kill_01` → `jung/kill`.
 fn category(name: &str, prefix: &str) -> String {
-    let rest = name.strip_prefix(prefix).unwrap_or(name);
-    // Хвост вида `_01` или `_12b` — номер варианта, в категорию не входит.
-    match rest.rsplit_once('_') {
-        Some((head, tail)) if tail.starts_with(|c: char| c.is_ascii_digit()) => head.to_owned(),
-        _ => rest.to_owned(),
+    let mut tags = Vec::new();
+    let mut rest = name;
+    if let Some(r) = rest.strip_prefix("auto_") {
+        tags.push("auto");
+        rest = r;
     }
+    if let Some(r) = rest.strip_prefix(prefix).filter(|_| !prefix.is_empty()) {
+        rest = r;
+    } else if !prefix.is_empty()
+        && let Some((tag, r)) = rest.split_once('_')
+    {
+        tags.push(tag);
+        rest = r;
+    }
+    // Хвост вида `_01` или `_12b` — номер варианта, в категорию не входит.
+    let base = match rest.rsplit_once('_') {
+        Some((head, tail)) if tail.starts_with(|c: char| c.is_ascii_digit()) => head,
+        _ => rest,
+    };
+    if tags.is_empty() { base.to_owned() } else { format!("{}/{base}", tags.join("/")) }
 }
 
 /// Человеческое название категории.
 pub fn category_label(category: &str) -> String {
+    if let Some((tags, base)) = category.rsplit_once('/') {
+        let tags: Vec<&str> = tags.split('/').map(|t| if t == "auto" { "Вторая версия" } else { t }).collect();
+        return format!("{} · {}", tags.join(" · "), category_label(base));
+    }
     if let Some(ability) = category.strip_prefix("ability_") {
         return format!("Способность: {ability}");
     }
@@ -525,6 +548,13 @@ mod tests {
         assert_eq!(category("bount_kill_01", "bount_"), "kill");
         assert_eq!(category("bount_firstblood", "bount_"), "firstblood");
         assert_eq!(category("bount_rival_12b", "bount_"), "rival");
+        assert_eq!(category("auto_axe_ability_berserk_02", "axe_"), "auto/ability_berserk");
+        assert_eq!(category("jung_kill_01", "axe_"), "jung/kill");
+        assert_eq!(category_label("auto/kill"), "Вторая версия · Убийства");
+
+        let names: Vec<String> =
+            ["auto_axe_kill_01", "auto_axe_kill_02", "axe_kill_01", "axe_kill_02", "jung_kill_01"].map(String::from).into();
+        assert_eq!(main_prefix(&names), "axe_");
     }
 
     #[test]

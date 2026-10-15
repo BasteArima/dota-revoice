@@ -15,7 +15,7 @@ impl App {
     pub(super) fn line_list(&mut self, ui: &mut egui::Ui) {
         let Some(p) = &self.project else {
             ui.add_space(8.0);
-            ui.label(theme::small("Открой папку с фразами героя"));
+            ui.label(theme::small("Выбери героя на вкладке «Герои»"));
             return;
         };
         egui::TopBottomPanel::bottom("legend").frame(egui::Frame::default()).show_inside(ui, |ui| {
@@ -118,10 +118,13 @@ impl App {
         let Some(line) = self.current_line() else {
             ui.vertical_centered(|ui| {
                 ui.add_space(150.0);
-                ui.label(theme::title("Открой папку с фразами героя", 22.0));
-                ui.label(theme::small("Выгрузка из Source 2 Viewer, например …/sounds/vo/bounty_hunter"));
+                ui.label(theme::title("Выбери героя", 22.0));
+                ui.label(theme::small("Фразы программа достанет из игры сама"));
                 ui.add_space(14.0);
-                if ui.add(theme::primary(format!("{}  Открыть папку", icon::FOLDER_OPEN))).clicked() {
+                if ui.add(theme::primary(format!("{}  К героям", icon::USERS_THREE))).clicked() {
+                    self.screen = super::Screen::Heroes;
+                }
+                if theme::ghost(ui, true, "или открыть свою папку со звуками…").clicked() {
                     self.pick_folder();
                 }
             });

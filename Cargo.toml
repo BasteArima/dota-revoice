@@ -21,6 +21,7 @@ mp3lame-encoder = "0.2"
 nnnoiseless = { version = "0.5", default-features = false }
 ogg = "0.9"
 opus-decoder = "0.1"
+png = "0.17"
 rfd = "0.15"
 rubato = "0.15"
 serde = { version = "1", features = ["derive"] }

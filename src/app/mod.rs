@@ -1,7 +1,9 @@
-//! Окно программы. Вкладки «Запись» (`record.rs`), «Сборка и установка» (`build.rs`),
-//! «Настройки» (`settings.rs`); при первом запуске — мастер (`setup.rs`).
+//! Окно программы. Вкладки «Герои» (`heroes.rs`), «Запись» (`record.rs`),
+//! «Сборка и установка» (`build.rs`), «Настройки» (`settings.rs`);
+//! при первом запуске — мастер (`setup.rs`).
 
 mod build;
+mod heroes;
 mod record;
 mod settings;
 mod setup;
@@ -21,6 +23,7 @@ use eframe::egui::{self, Align, Key, Modifiers, RichText};
 
 use crate::config::{Config, PreRoll};
 use build::BuildState;
+use heroes::HeroesState;
 use settings::SettingsState;
 use theme::{GOLD, ON_GOLD, PANEL, RED, icon};
 
@@ -33,6 +36,7 @@ const MIN_TRIM_SAMPLES: usize = audio::RATE as usize / 10;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    Heroes,
     Record,
     Build,
     Settings,
@@ -111,6 +115,7 @@ pub struct App {
     message: Option<Message>,
     build: BuildState,
     settings: SettingsState,
+    heroes: HeroesState,
 }
 
 impl App {
@@ -149,6 +154,7 @@ impl App {
             message: None,
             build: BuildState::default(),
             settings: SettingsState::default(),
+            heroes: HeroesState::default(),
             config,
         };
         match Player::new() {
@@ -162,6 +168,9 @@ impl App {
         app.migrate_old_config();
         if let Some(folder) = app.config.last_folder.clone().filter(|f| f.is_dir()) {
             app.open_project(&folder);
+        }
+        if app.project.is_none() {
+            app.screen = Screen::Heroes;
         }
         app
     }
@@ -213,9 +222,11 @@ impl App {
                         None => groups.push((line.category.clone(), vec![i])),
                     }
                 }
+                // Обычные фразы героя — сверху, вторые версии и прочие группы — после них.
+                groups.sort_by_key(|(c, _)| c.contains('/'));
                 self.info(format!(
                     "Открыт {}: {} фраз, записано {}. Свои фразы сохраняются в {}",
-                    hero_title(&p.hero),
+                    self.hero_name(&p.hero),
                     p.lines.len(),
                     p.recorded_count(),
                     p.export_root.join(&p.resource_dir).display()
@@ -767,13 +778,13 @@ impl App {
             ui.add_space(10.0);
 
             if let Some(p) = &self.project {
-                let text = format!("{}  ·  {}/{}", hero_title(&p.hero), p.recorded_count(), p.lines.len());
+                let text = format!("{}  ·  {}/{}", self.hero_name(&p.hero), p.recorded_count(), p.lines.len());
                 let chip = egui::Button::new(RichText::new(text).color(theme::TEXT)).corner_radius(99);
-                if ui.add(chip).on_hover_text("Открыть другую папку с фразами").clicked() {
-                    self.pick_folder();
+                if ui.add(chip).on_hover_text("К списку героев").clicked() {
+                    self.screen = Screen::Heroes;
                 }
-            } else if ui.add(theme::primary(format!("{}  Открыть папку", icon::FOLDER_OPEN))).clicked() {
-                self.pick_folder();
+            } else if ui.add(theme::primary(format!("{}  Выбрать героя", icon::USERS_THREE))).clicked() {
+                self.screen = Screen::Heroes;
             }
 
             // Вкладки — сегментированный переключатель ровно по центру окна.
@@ -781,11 +792,12 @@ impl App {
             ui.add_space(gap.max(10.0));
             let tabs = egui::Frame::default().fill(theme::BG).corner_radius(10).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for (screen, label) in [(Screen::Record, "Запись"), (Screen::Build, "Сборка и установка")] {
+                for (screen, label) in [(Screen::Heroes, "Герои"), (Screen::Record, "Запись"), (Screen::Build, "Сборка и установка")] {
                     let on = self.screen == screen;
                     let text = RichText::new(label).color(if on { theme::TEXT } else { theme::MUTED });
                     let btn = egui::Button::new(text).fill(if on { theme::CARD } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::NONE).corner_radius(8);
-                    if ui.add_enabled(self.project.is_some(), btn).clicked() && !on {
+                    let enabled = screen == Screen::Heroes || self.project.is_some();
+                    if ui.add_enabled(enabled, btn).clicked() && !on {
                         self.screen = screen;
                         if screen == Screen::Build {
                             self.build.refresh_now();
@@ -802,7 +814,11 @@ impl App {
                     .stroke(egui::Stroke::NONE)
                     .corner_radius(8);
                 if ui.add(gear).on_hover_text("Настройки").clicked() {
-                    self.screen = if on { Screen::Record } else { Screen::Settings };
+                    self.screen = match (on, self.project.is_some()) {
+                        (false, _) => Screen::Settings,
+                        (true, true) => Screen::Record,
+                        (true, false) => Screen::Heroes,
+                    };
                 }
                 if let Some(d) = &self.dota {
                     let text = format!("Озвучка: {}", game::language_name(d.voice_language.as_deref()));
@@ -929,6 +945,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(100));
             return;
         }
+        self.poll_heroes(ctx);
 
         let bar_frame = egui::Frame::side_top_panel(&ctx.style()).fill(PANEL).inner_margin(egui::Margin::symmetric(14, 10));
         egui::TopBottomPanel::top("top").frame(bar_frame).show(ctx, |ui| self.top_bar(ui));
@@ -963,6 +980,11 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.editor(ui));
                     });
             }
+            Screen::Heroes => {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 18)))
+                    .show(ctx, |ui| self.heroes_screen(ui));
+            }
             Screen::Build | Screen::Settings => {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 18)))
@@ -982,7 +1004,8 @@ impl eframe::App for App {
         let busy = self.player.as_ref().is_some_and(|p| p.now_playing().is_some())
             || self.is_recording()
             || self.pending.is_some()
-            || self.build.busy();
+            || self.build.busy()
+            || self.heroes.busy();
         ctx.request_repaint_after(if busy { Duration::from_millis(16) } else { Duration::from_millis(60) });
     }
 
@@ -998,17 +1021,6 @@ fn secs_to_index(secs: f32, len: usize) -> usize {
 
 fn index_to_secs(index: usize) -> f32 {
     index as f32 / audio::RATE as f32
-}
-
-/// `bounty_hunter` → `Bounty Hunter`.
-fn hero_title(hero: &str) -> String {
-    hero.split('_')
-        .map(|w| {
-            let mut c = w.chars();
-            c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// `bount_kill_01` → `bount`: в списке показываем имя без префикса героя.

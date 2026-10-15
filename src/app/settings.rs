@@ -190,8 +190,12 @@ impl App {
                     None => {}
                 }
             }
+            let originals = self.config.library_dir().join("originals");
+            if let Some(RowAction::Show) = info_row(ui, "Оригиналы из игры", &originals) {
+                open_folder(&originals);
+            }
             ui.label(theme::small(
-                "Мои фразы по умолчанию лежат в рабочей папке, собранный пак — в моих фразах. При смене папки с фразами программа предложит перенести записи.",
+                "Мои фразы по умолчанию лежат в рабочей папке, собранный пак — в моих фразах. Оригиналы программа достаёт из игры сама — их можно удалить, достанутся заново. При смене папки с фразами программа предложит перенести записи.",
             ));
             self.pending_move_box(ui);
             match &self.settings.result {
