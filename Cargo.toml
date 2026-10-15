@@ -1,0 +1,13 @@
+[package]
+name = "dota_revoice"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+crc32fast = "1"
+md-5 = "0.10"
+
+[[bin]]
+name = "vsnd_spike"
+path = "src/bin/vsnd_spike.rs"
