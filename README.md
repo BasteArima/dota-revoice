@@ -3,6 +3,10 @@
 </p>
 
 <p align="center">
+  <a href="README.en.md">English</a> | <b>Русский</b>
+</p>
+
+<p align="center">
   <a href="https://github.com/BasteArima/dota-revoice/actions/workflows/ci.yml"><img src="https://github.com/BasteArima/dota-revoice/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/BasteArima/dota-revoice/releases/latest"><img src="https://img.shields.io/github/v/release/BasteArima/dota-revoice?include_prereleases&label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7" alt="Последний релиз"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/BasteArima/dota-revoice?label=%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F" alt="Лицензия GPL-3.0"></a>
