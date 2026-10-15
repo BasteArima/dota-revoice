@@ -110,6 +110,24 @@ pub fn has_changes(dota: &DotaInstall) -> bool {
         .is_some_and(|d| d.join(PAK_NAME).is_file() || d.join("pak01_dir.vpk.off").is_file())
 }
 
+/// Запускает Доту через Steam — так же, как ярлык игры: Steam проверит
+/// обновления и применит параметры запуска пользователя.
+pub fn launch_dota() -> Result<()> {
+    const URL: &str = "steam://rungameid/570";
+    #[cfg(windows)]
+    let status = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd").args(["/C", "start", "", URL]).creation_flags(CREATE_NO_WINDOW).status()
+    };
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open").arg(URL).status();
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open").arg(URL).status();
+    ensure!(status.context("Steam не запустился")?.success(), "Steam не открыл Доту — он установлен?");
+    Ok(())
+}
+
 pub fn is_dota_running() -> bool {
     #[cfg(windows)]
     {

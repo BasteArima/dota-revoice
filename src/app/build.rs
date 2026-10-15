@@ -42,6 +42,7 @@ struct Snapshot {
     installed: Installed,
     valve_enabled: bool,
     has_changes: bool,
+    dota_running: bool,
 }
 
 impl Snapshot {
@@ -161,6 +162,7 @@ impl App {
             installed,
             valve_enabled: self.dota.as_ref().and_then(|d| d.voice_pak()).is_some_and(|v| v.enabled),
             has_changes: self.dota.as_ref().is_some_and(install::has_changes),
+            dota_running: install::is_dota_running(),
         });
     }
 
@@ -218,7 +220,6 @@ impl App {
         };
         let state = |n: u8| match n.cmp(&current) {
             std::cmp::Ordering::Less => StepState::Done,
-            std::cmp::Ordering::Equal if n == 3 => StepState::Done,
             std::cmp::Ordering::Equal => StepState::Current,
             std::cmp::Ordering::Greater => StepState::Later,
         };
@@ -235,15 +236,7 @@ impl App {
                 ui.add_space(10.0);
                 self.step_install(ui, &ctx, &snap, state(2));
                 ui.add_space(10.0);
-                step_card(ui, 3, state(3), |ui| {
-                    ui.label(theme::title("Запусти Доту", 15.0));
-                    let text = if current == 3 {
-                        "Готово! Новые фразы подхватятся при старте игры. Если Дота открыта — перезапусти её."
-                    } else {
-                        "Новые фразы подхватятся при старте игры."
-                    };
-                    ui.label(theme::small(text));
-                });
+                self.step_launch(ui, &snap, current, state(3));
                 ui.add_space(14.0);
                 self.build_details(ui);
             });
@@ -387,6 +380,32 @@ impl App {
                 }
             }
             result_line(ui, self.build.game_result.as_ref());
+        });
+    }
+
+    fn step_launch(&mut self, ui: &mut egui::Ui, snap: &Snapshot, current: u8, state: StepState) {
+        step_card(ui, 3, state, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(theme::title("Запустить Доту", 15.0));
+                if snap.dota_running {
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| theme::pill(ui, "Дота запущена", GREEN));
+                }
+            });
+            let (text, color) = match (current, snap.dota_running) {
+                (3, true) => ("Дота уже открыта. Игра читает паки только при старте — закрой её и запусти заново, чтобы услышать новые фразы.", AMBER),
+                (3, false) => ("Всё готово — запускай. Новые фразы подхватятся при старте игры.", MUTED),
+                _ => ("Сначала собери и установи пак — иначе в игре будет прежняя озвучка.", MUTED),
+            };
+            ui.label(RichText::new(text).size(12.0).color(color));
+            ui.add_space(4.0);
+            let label = format!("{}  Запустить Доту", icon::PLAY);
+            let btn = if current == 3 && !snap.dota_running { theme::primary(label) } else { egui::Button::new(label) };
+            if ui.add_enabled(self.dota.is_some(), btn).on_hover_text("Через Steam, как обычный ярлык игры").clicked() {
+                match install::launch_dota() {
+                    Ok(()) => self.info("Запускаю Доту через Steam…"),
+                    Err(e) => self.error(format!("{e:#}")),
+                }
+            }
         });
     }
 
