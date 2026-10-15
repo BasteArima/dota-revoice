@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner.png" alt="Dota Revoice — переозвучка героев Dota 2" width="100%">
+  <img src="docs/banner_fun.jpg" alt="Dota Revoice — переозвучка героев Dota 2" width="100%">
 </p>
 
 <p align="center">
