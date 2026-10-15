@@ -2,12 +2,25 @@
 name = "dota_revoice"
 version = "0.1.0"
 edition = "2024"
+default-run = "dota_revoice"
 
 [dependencies]
 anyhow = "1"
+cpal = "0.15"
 crc32fast = "1"
+eframe = "0.31"
+hound = "3.5"
 md-5 = "0.10"
+mp3lame-encoder = "0.2"
+rfd = "0.15"
+rubato = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "pcm", "ogg", "vorbis", "flac", "isomp4", "aac"] }
 
 [[bin]]
 name = "vsnd_spike"
 path = "src/bin/vsnd_spike.rs"
+
+[target."cfg(windows)".dependencies]
+winreg = "0.52"

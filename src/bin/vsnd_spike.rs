@@ -1,4 +1,4 @@
-//! Этап 0: собрать VPK из пар «путь в игре = mp3-файл».
+//! Утилита для отладки: собрать VPK из пар «путь в игре = mp3-файл».
 //!
 //! vsnd_spike [--base <pak01_dir.vpk>] <out.vpk> <путь_в_игре>=<файл.mp3> ...
 //!
@@ -6,16 +6,10 @@
 //! (например, русская озвучка), а перечисленные файлы подменяются.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use dota_revoice::{
-    mp3,
-    vpk::{VpkBuilder, VpkReader},
-    vsnd,
-};
+use dota_revoice::pack;
 
 const USAGE: &str = "использование: vsnd_spike [--base <pak01_dir.vpk>] <out.vpk> <путь_в_игре>=<файл.mp3> ...\n\
                      пример: vsnd_spike out/pak02_dir.vpk sounds/vo/bounty_hunter/bount_kill_01=kill.mp3";
@@ -36,50 +30,19 @@ fn main() -> Result<()> {
         let (game_path, file) = pair
             .split_once('=')
             .with_context(|| format!("ожидал <путь_в_игре>=<файл.mp3>, получил {pair}"))?;
-        let resource = game_path.trim_end_matches(".vsnd_c").trim_end_matches(".vsnd");
-
-        let bytes = std::fs::read(file).with_context(|| format!("не читается {file}"))?;
-        let stream = mp3::parse(&bytes).with_context(|| format!("не разобрал mp3 {file}"))?;
-        if stream.sample_rate != 44100 {
-            eprintln!("  внимание: {file} в {} Гц, озвучка в игре 44100 Гц", stream.sample_rate);
-        }
-        let compiled = vsnd::build(resource, &stream);
-        println!(
-            "{resource}.vsnd_c ← {file}: {} Гц, {} кан., {} кадров, {:.3} с, {} байт",
-            stream.sample_rate,
-            stream.channels,
-            stream.frame_count,
-            stream.duration_secs(),
-            compiled.len()
-        );
-        replacements.insert(format!("{resource}.vsnd_c").to_ascii_lowercase(), compiled);
+        let resource = game_path.trim_end_matches(".vsnd_c").trim_end_matches(".vsnd").to_ascii_lowercase();
+        replacements.insert(resource, PathBuf::from(file));
     }
 
-    let mut vpk = VpkBuilder::default();
-    if let Some(base) = &base {
-        let reader = VpkReader::open(base)?;
-        for path in replacements.keys() {
-            if !reader.contains(path) {
-                eprintln!("  внимание: в базовом паке нет {path} — это новый файл, а не замена");
-            }
-        }
-        let mut copied = 0usize;
-        for path in reader.entries().keys().filter(|p| !replacements.contains_key(*p)) {
-            vpk.add(path, reader.read(path)?)?;
-            copied += 1;
-        }
-        println!("скопировано из {base}: {copied} файлов");
+    let summary = pack::build(base.as_deref().map(Path::new), &replacements, Path::new(out_path), |_| {})?;
+    for p in &summary.not_in_base {
+        eprintln!("  внимание: в базовом паке нет {p} — это новый файл, а не замена");
     }
-    for (path, data) in replacements {
-        vpk.add(&path, data)?;
-    }
-
-    if let Some(dir) = Path::new(out_path).parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)?;
-    }
-    let file = File::create(out_path).with_context(|| format!("не создаётся {out_path}"))?;
-    vpk.write_to(BufWriter::new(file)).with_context(|| format!("не записался {out_path}"))?;
-    let size = std::fs::metadata(out_path)?.len();
-    println!("готово: {out_path} ({} файлов, {:.1} МБ)", vpk.len(), size as f64 / 1_048_576.0);
+    println!(
+        "готово: {out_path} — заменено {}, скопировано {}, {:.1} МБ",
+        summary.replaced,
+        summary.copied,
+        summary.size_bytes as f64 / 1_048_576.0
+    );
     Ok(())
 }

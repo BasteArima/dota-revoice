@@ -199,12 +199,17 @@ impl VpkReader {
     }
 
     /// `pak01_dir.vpk` → `pak01_003.vpk`; встроенные данные — сам `_dir`.
+    /// Отключённый `pak01_dir.vpk.off` ссылается на те же `pak01_00N.vpk`.
     fn archive_path(&self, index: u16) -> Result<PathBuf> {
         if index == EMBEDDED_ARCHIVE {
             return Ok(self.dir_path.clone());
         }
         let name = self.dir_path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        let stem = name.strip_suffix("_dir.vpk").with_context(|| format!("имя не оканчивается на _dir.vpk: {name}"))?;
+        let stem = name
+            .strip_suffix(".off")
+            .unwrap_or(name)
+            .strip_suffix("_dir.vpk")
+            .with_context(|| format!("имя не оканчивается на _dir.vpk: {name}"))?;
         Ok(self.dir_path.with_file_name(format!("{stem}_{index:03}.vpk")))
     }
 }
