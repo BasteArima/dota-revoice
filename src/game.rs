@@ -10,14 +10,40 @@ use std::path::{Path, PathBuf};
 pub struct DotaInstall {
     /// `.../dota 2 beta/game`
     pub game_dir: PathBuf,
-    /// Например, `russian`. `None` — английская озвучка, папки языка нет.
+    /// Какая озвучка включена в игре, например `russian`. `None` — английская.
     pub audio_language: Option<String>,
+    /// Озвучку какого языка переделываем (выбор в настройках, по умолчанию — как в игре).
+    /// `None` — английская: своей папки языка у неё нет.
+    pub voice_language: Option<String>,
 }
 
 impl DotaInstall {
     /// Папка, где лежат паки озвучки и куда кладутся моды: `game/dota_russian`.
     pub fn language_dir(&self) -> Option<PathBuf> {
-        self.audio_language.as_ref().map(|l| self.game_dir.join(format!("dota_{l}")))
+        self.voice_language.as_ref().map(|l| self.game_dir.join(format!("dota_{l}")))
+    }
+
+    /// В игре включена не та озвучка, для которой собираем мод.
+    pub fn audio_mismatch(&self) -> bool {
+        self.audio_language != self.voice_language
+    }
+
+    /// Языки озвучки, скачанные в Steam: папки `dota_<язык>` с паком.
+    /// Steam создаёт папки всех языков, но пак кладёт только в выбранные.
+    pub fn voice_languages(&self) -> Vec<String> {
+        let mut langs: Vec<String> = std::fs::read_dir(&self.game_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.to_owned();
+                let lang = name.strip_prefix("dota_")?;
+                let dir = e.path();
+                (dir.join("pak01_dir.vpk").is_file() || dir.join("pak01_dir.vpk.off").is_file()).then(|| lang.to_owned())
+            })
+            .collect();
+        langs.sort();
+        langs
     }
 
     /// Пак озвучки Valve: включённый `pak01_dir.vpk` или уже отключённый `.off`.
@@ -42,14 +68,35 @@ pub struct VoicePak {
     pub enabled: bool,
 }
 
-pub fn find_dota() -> Option<DotaInstall> {
-    steam_libraries().into_iter().find_map(|lib| {
-        let game_dir = lib.join("steamapps/common/dota 2 beta/game");
-        game_dir.join("dota").is_dir().then(|| DotaInstall {
-            audio_language: read_audio_language(&game_dir),
-            game_dir,
-        })
-    })
+/// Ищет Доту: в папке, которую указали в настройках, иначе — в библиотеках Steam.
+/// `voice` — язык озвучки для мода из настроек; `None` — как в игре.
+pub fn find_dota(dota_dir: Option<&Path>, voice: Option<&str>) -> Option<DotaInstall> {
+    let game_dir = match dota_dir {
+        Some(dir) => game_dir_of(dir)?,
+        // По частям, а не строкой со слешами: путь показывается в настройках и должен быть ровным.
+        None => steam_libraries().into_iter().find_map(|lib| game_dir_of(&lib.join("steamapps").join("common").join("dota 2 beta")))?,
+    };
+    let audio_language = read_audio_language(&game_dir);
+    let voice_language = voice.map(str::to_owned).or_else(|| audio_language.clone());
+    Some(DotaInstall { game_dir, audio_language, voice_language })
+}
+
+/// Папка `game` внутри выбранной: годится и `dota 2 beta`, и сама `game`.
+pub fn game_dir_of(dir: &Path) -> Option<PathBuf> {
+    [dir.join("game"), dir.to_path_buf()].into_iter().find(|g| g.join("dota").is_dir())
+}
+
+/// `russian` → «русская». Названия папок Valve, а не коды языков.
+pub fn language_name(lang: Option<&str>) -> String {
+    match lang {
+        None | Some("english") => "английская",
+        Some("russian") => "русская",
+        Some("schinese") => "китайская",
+        Some("koreana") => "корейская",
+        Some("japanese") => "японская",
+        Some(other) => return other.to_owned(),
+    }
+    .to_owned()
 }
 
 fn read_audio_language(game_dir: &Path) -> Option<String> {
@@ -126,5 +173,34 @@ mod tests {
 
         let boot = "\"boot\"\n{\n\t\"UILanguage\"\t\t\"russian\"\n\t\"AudioLanguage\"\t\t\"russian\"\n}";
         assert_eq!(vdf_value(boot, "AudioLanguage").as_deref(), Some("russian"));
+    }
+
+    #[test]
+    fn finds_game_in_chosen_folder_and_voice_languages() {
+        let root = std::env::temp_dir().join(format!("dota_revoice_game_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let game = root.join("dota 2 beta/game");
+        std::fs::create_dir_all(game.join("dota/cfg")).unwrap();
+        std::fs::write(game.join("dota/cfg/boot.vcfg"), "\"boot\"\n{\n\t\"AudioLanguage\"\t\t\"russian\"\n}").unwrap();
+        // Скачанная озвучка — папка с паком (в том числе отключённым); пустые папки Steam не в счёт.
+        for (lang, pak) in [("russian", Some("pak01_dir.vpk.off")), ("schinese", Some("pak01_dir.vpk")), ("koreana", None)] {
+            std::fs::create_dir_all(game.join(format!("dota_{lang}"))).unwrap();
+            if let Some(pak) = pak {
+                std::fs::write(game.join(format!("dota_{lang}/{pak}")), b"x").unwrap();
+            }
+        }
+
+        for picked in [root.join("dota 2 beta"), game.clone()] {
+            let dota = find_dota(Some(&picked), None).unwrap();
+            assert_eq!(dota.game_dir, game);
+            assert_eq!(dota.voice_language.as_deref(), Some("russian"));
+            assert!(!dota.audio_mismatch());
+            assert_eq!(dota.voice_languages(), ["russian", "schinese"]);
+        }
+        let other = find_dota(Some(&game), Some("schinese")).unwrap();
+        assert_eq!(other.language_dir().unwrap(), game.join("dota_schinese"));
+        assert!(other.audio_mismatch());
+        assert!(find_dota(Some(&root), None).is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -11,6 +11,7 @@ repository = "https://github.com/BasteArima/dota-revoice"
 anyhow = "1"
 cpal = "0.15"
 crc32fast = "1"
+dirs = "6"
 ebur128 = { version = "0.1", default-features = false }
 eframe = "0.31"
 egui-phosphor = "0.9"

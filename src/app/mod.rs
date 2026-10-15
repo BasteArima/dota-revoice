@@ -1,7 +1,10 @@
-//! Окно программы. Две вкладки: «Запись» (`record.rs`) и «Сборка и установка» (`build.rs`).
+//! Окно программы. Вкладки «Запись» (`record.rs`), «Сборка и установка» (`build.rs`),
+//! «Настройки» (`settings.rs`); при первом запуске — мастер (`setup.rs`).
 
 mod build;
 mod record;
+mod settings;
+mod setup;
 mod theme;
 
 use std::collections::HashSet;
@@ -18,6 +21,7 @@ use eframe::egui::{self, Align, Key, Modifiers, RichText};
 
 use crate::config::{Config, PreRoll};
 use build::BuildState;
+use settings::SettingsState;
 use theme::{GOLD, ON_GOLD, PANEL, RED, icon};
 
 const MIN_TAKE_SECS: f32 = 0.2;
@@ -31,6 +35,7 @@ const MIN_TRIM_SAMPLES: usize = audio::RATE as usize / 10;
 enum Screen {
     Record,
     Build,
+    Settings,
 }
 
 enum Message {
@@ -105,6 +110,7 @@ pub struct App {
 
     message: Option<Message>,
     build: BuildState,
+    settings: SettingsState,
 }
 
 impl App {
@@ -112,7 +118,7 @@ impl App {
         theme::setup(&cc.egui_ctx);
         let config = Config::load();
         let mut app = Self {
-            dota: game::find_dota(),
+            dota: find_dota(&config),
             screen: Screen::Record,
             project: None,
             groups: Vec::new(),
@@ -142,6 +148,7 @@ impl App {
             clipped: false,
             message: None,
             build: BuildState::default(),
+            settings: SettingsState::default(),
             config,
         };
         match Player::new() {
@@ -149,11 +156,26 @@ impl App {
             Err(e) => app.error(format!("Звук не выводится: {e:#}")),
         }
         app.open_recorder(app.config.input_device.clone());
-        app.start_update_check(&cc.egui_ctx);
+        if app.config.check_updates {
+            app.start_update_check(&cc.egui_ctx);
+        }
+        app.migrate_old_config();
         if let Some(folder) = app.config.last_folder.clone().filter(|f| f.is_dir()) {
             app.open_project(&folder);
         }
         app
+    }
+
+    /// Версия до настроек папок хранила свои фразы в `export` рядом с выгрузкой героя.
+    /// Тем, кто уже записывал, мастер не показываем: эта папка становится «Моими фразами».
+    fn migrate_old_config(&mut self) {
+        if self.config.setup_done {
+            return;
+        }
+        let Some(folder) = self.config.last_folder.clone() else { return };
+        self.config.export_dir = Some(project::legacy_export_root(&folder));
+        self.config.setup_done = true;
+        self.config.save();
     }
 
     fn info(&mut self, text: impl Into<String>) {
@@ -182,7 +204,7 @@ impl App {
     }
 
     fn open_project(&mut self, folder: &Path) {
-        match Project::open(folder) {
+        match Project::open_in(folder, &self.config.export_root()) {
             Ok(p) => {
                 let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
                 for (i, line) in p.lines.iter().enumerate() {
@@ -515,7 +537,7 @@ impl App {
 
     fn toggle_record(&mut self) {
         let Some(rec) = &self.recorder else {
-            self.error("Микрофон не открыт — выбери его вверху");
+            self.error("Микрофон не открыт — выбери его в настройках");
             return;
         };
         if self.pending.take().is_some() {
@@ -774,21 +796,17 @@ impl App {
             self.tabs_width = tabs.response.rect.width();
 
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                let current = self.recorder.as_ref().map(|r| r.device_name.clone()).unwrap_or_else(|| "нет микрофона".into());
-                let mut chosen = None;
-                egui::ComboBox::from_id_salt("mic")
-                    .selected_text(format!("{}  {current}", icon::MICROPHONE))
-                    .width(240.0)
-                    .show_ui(ui, |ui| {
-                        for name in &self.input_devices {
-                            if ui.selectable_label(*name == current, name.as_str()).clicked() {
-                                chosen = Some(name.clone());
-                            }
-                        }
-                    });
-                if let Some(name) = chosen {
-                    self.open_recorder(Some(name));
-                    self.config.save();
+                let on = self.screen == Screen::Settings;
+                let gear = egui::Button::new(RichText::new(icon::GEAR_SIX).size(18.0).color(if on { GOLD } else { theme::MUTED }))
+                    .fill(if on { theme::CARD } else { egui::Color32::TRANSPARENT })
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(8);
+                if ui.add(gear).on_hover_text("Настройки").clicked() {
+                    self.screen = if on { Screen::Record } else { Screen::Settings };
+                }
+                if let Some(d) = &self.dota {
+                    let text = format!("Озвучка: {}", game::language_name(d.voice_language.as_deref()));
+                    ui.label(theme::small(text));
                 }
             });
         });
@@ -833,29 +851,39 @@ impl App {
             return;
         }
         self.game_checked = Some(Instant::now());
-        self.dota = game::find_dota();
+        self.dota = find_dota(&self.config);
         self.alert = self.dota.as_ref().and_then(install::check);
     }
 
     /// Предупреждение под верхней панелью — видно на обеих вкладках.
     fn alert_banner(&mut self, ui: &mut egui::Ui, alert: install::Alert) {
+        let (game_lang, voice_lang) = match &self.dota {
+            Some(d) => (game::language_name(d.audio_language.as_deref()), game::language_name(d.voice_language.as_deref())),
+            None => Default::default(),
+        };
         let (text, action) = match alert {
             install::Alert::ValveRestored => (
-                "Steam вернул озвучку Valve — так бывает после обновления Доты или проверки файлов. Сейчас в игре звучат не твои фразы.",
-                Some("Переустановить"),
+                "Steam вернул озвучку Valve — так бывает после обновления Доты или проверки файлов. Сейчас в игре звучат не твои фразы.".to_owned(),
+                Some(("Переустановить", "Пересобрать и установить пак заново", Screen::Build)),
             ),
             install::Alert::EnglishAudio => (
-                "В Доте выбрана английская озвучка — моды из папки языка не загружаются. Переключи язык озвучки игры на русский и перезапусти её.",
+                "В Доте выбрана английская озвучка — моды из папки языка не загружаются. Переключи язык озвучки игры на русский и перезапусти её.".to_owned(),
                 None,
+            ),
+            install::Alert::OtherAudio => (
+                format!(
+                    "В Доте включена {game_lang} озвучка, а мод собирается для озвучки «{voice_lang}» — в игре его не будет слышно. Переключи язык озвучки игры или выбери другую озвучку в настройках."
+                ),
+                Some(("Настройки", "Выбрать, какую озвучку переделываем", Screen::Settings)),
             ),
         };
         ui.horizontal(|ui| {
             ui.label(RichText::new(icon::WARNING).size(18.0).color(theme::AMBER));
             ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT)).wrap());
-            if let Some(label) = action {
+            if let Some((label, hint, screen)) = action {
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(theme::primary(label)).on_hover_text("Пересобрать и установить пак заново").clicked() {
-                        self.screen = Screen::Build;
+                    if ui.add(theme::primary(label)).on_hover_text(hint).clicked() {
+                        self.screen = screen;
                         self.build.refresh_now();
                     }
                 });
@@ -892,6 +920,16 @@ impl eframe::App for App {
         self.tick_pending(ctx);
         self.poll_build_tasks();
 
+        if !self.config.setup_done {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 28)))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.setup_screen(ui));
+                });
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
+
         let bar_frame = egui::Frame::side_top_panel(&ctx.style()).fill(PANEL).inner_margin(egui::Margin::symmetric(14, 10));
         egui::TopBottomPanel::top("top").frame(bar_frame).show(ctx, |ui| self.top_bar(ui));
         if let Some(alert) = self.alert {
@@ -925,11 +963,17 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.editor(ui));
                     });
             }
-            Screen::Build => {
+            Screen::Build | Screen::Settings => {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 18)))
                     .show(ctx, |ui| {
-                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.build_screen(ui));
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                            if self.screen == Screen::Build {
+                                self.build_screen(ui);
+                            } else {
+                                self.settings_screen(ui);
+                            }
+                        });
                     });
             }
         }
@@ -972,15 +1016,22 @@ fn prefix_of(name: &str) -> &str {
     name.split_once('_').map_or("", |(p, _)| p)
 }
 
+/// Дота по настройкам: своя папка игры и выбранный язык озвучки.
+fn find_dota(config: &Config) -> Option<DotaInstall> {
+    game::find_dota(config.dota_dir.as_deref(), config.voice_language.as_deref())
+}
+
 fn dota_status(dota: Option<&DotaInstall>) -> String {
     let Some(d) = dota else { return "Дота не найдена".into() };
-    let Some(lang) = &d.audio_language else {
+    if d.voice_language.is_none() {
         return "Озвучка Доты английская — для модов переключи язык озвучки".into();
-    };
-    match d.voice_pak() {
-        Some(v) if v.enabled => format!("Дота · озвучка {lang} · пак Valve включён"),
-        Some(_) => format!("Дота · озвучка {lang} · работает наш пак"),
-        None => format!("Дота · озвучка {lang} · пак озвучки не скачан"),
+    }
+    let lang = game::language_name(d.voice_language.as_deref());
+    match (d.voice_pak(), install::mod_state(d)) {
+        (None, _) => format!("Дота · озвучка {lang} · пак озвучки не скачан"),
+        (Some(v), install::ModState::Enabled) if !v.enabled => format!("Дота · озвучка {lang} · работает наш пак"),
+        (Some(_), install::ModState::Disabled) => format!("Дота · озвучка {lang} · мод выключен"),
+        (Some(_), _) => format!("Дота · озвучка {lang} · пак Valve включён"),
     }
 }
 
@@ -995,6 +1046,17 @@ fn open_url(url: &str) {
     let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(not(windows), not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+/// Открывает папку в проводнике (создав её, если ещё нет).
+fn open_folder(path: &Path) {
+    let _ = std::fs::create_dir_all(path);
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
 
 fn reveal(path: &Path) {

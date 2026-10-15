@@ -277,7 +277,13 @@ pub struct Project {
 }
 
 impl Project {
+    /// Свои фразы — в `export` рядом с выгрузкой (как было до настроек папок).
     pub fn open(source_dir: &Path) -> Result<Self> {
+        Self::open_in(source_dir, &legacy_export_root(source_dir))
+    }
+
+    /// Свои фразы — в `export_root` (папка «Мои фразы» из настроек).
+    pub fn open_in(source_dir: &Path, export_root: &Path) -> Result<Self> {
         let source_dir = source_dir.to_path_buf();
         let mut files: Vec<PathBuf> = std::fs::read_dir(&source_dir)
             .with_context(|| format!("не открывается папка {}", source_dir.display()))?
@@ -287,7 +293,8 @@ impl Project {
         ensure!(!files.is_empty(), "в папке {} нет звуков (mp3, wav, ogg…)", source_dir.display());
         files.sort();
 
-        let (resource_dir, export_root) = locate(&source_dir);
+        let (resource_dir, _) = locate(&source_dir);
+        let export_root = export_root.to_path_buf();
         let hero = resource_dir.rsplit('/').next().unwrap_or_default().to_owned();
 
         let names: Vec<String> = files.iter().map(|p| file_stem(p)).collect();
@@ -417,6 +424,11 @@ pub fn has_audio_ext(p: &Path) -> bool {
 
 fn file_stem(p: &Path) -> String {
     p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase()
+}
+
+/// Где лежали свои фразы до настроек папок: `export` рядом с выгрузкой героя.
+pub fn legacy_export_root(source_dir: &Path) -> PathBuf {
+    locate(source_dir).1
 }
 
 /// Каталог ресурса внутри игры и корень экспорта.

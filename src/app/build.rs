@@ -5,11 +5,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
-use dota_revoice::{exchange, install, pack};
+use dota_revoice::install::ModState;
+use dota_revoice::{exchange, game, install, pack};
 use eframe::egui::{self, Align, Align2, Color32, FontId, RichText, Sense, Stroke, vec2};
 
 use super::theme::{self, AMBER, BG_DEEP, FAINT, GOLD, GREEN, LINE, MUTED, ON_GOLD, RED, TEXT, icon};
-use super::{App, reveal};
+use super::App;
 
 /// Как часто перечитывать состояние файлов, пока открыта вкладка.
 const REFRESH: Duration = Duration::from_secs(2);
@@ -23,6 +24,8 @@ struct PackJob {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GameAction {
     Install,
+    Enable,
+    Disable,
     Rollback,
 }
 
@@ -40,6 +43,7 @@ struct Snapshot {
     newest_change: Option<SystemTime>,
     built: Option<(u64, SystemTime)>,
     installed: Installed,
+    mod_state: ModState,
     valve_enabled: bool,
     has_changes: bool,
     dota_running: bool,
@@ -60,7 +64,12 @@ impl Snapshot {
     }
 
     fn installed_ok(&self) -> bool {
-        self.installed == Installed::Same && !self.valve_enabled
+        self.installed == Installed::Same && self.mod_state == ModState::Enabled && !self.valve_enabled
+    }
+
+    /// В игре звучат мои фразы (мод включён и не перекрыт паком Valve).
+    fn mine_audible(&self) -> bool {
+        self.mod_state == ModState::Enabled && !self.valve_enabled
     }
 }
 
@@ -116,7 +125,7 @@ enum StepState {
 
 impl App {
     fn built_pak(&self) -> Option<PathBuf> {
-        Some(self.project.as_ref()?.export_root.join("build").join(install::PAK_NAME))
+        Some(self.config.build_root().join(install::PAK_NAME))
     }
 
     /// Забирает результаты фоновой сборки и установки.
@@ -159,8 +168,9 @@ impl App {
         let (Some(p), Some(built_path)) = (&self.project, self.built_pak()) else { return };
         let mine = pack::collect_export(&p.export_root).unwrap_or_default();
         let built = std::fs::metadata(&built_path).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
-        let lang = self.dota.as_ref().and_then(|d| d.language_dir());
-        let installed = match (lang.as_ref().and_then(|d| std::fs::metadata(d.join(install::PAK_NAME)).ok()), built) {
+        let in_game = self.dota.as_ref().and_then(install::installed_pak).and_then(|p| std::fs::metadata(p).ok());
+        // Выключение и включение — переименование, время файла сохраняется.
+        let installed = match (in_game, built) {
             (None, _) => Installed::No,
             (Some(m), Some((len, at))) if m.len() == len && m.modified().is_ok_and(|t| t >= at) => Installed::Same,
             (Some(_), _) => Installed::Other,
@@ -170,6 +180,7 @@ impl App {
             newest_change: newest_change(&p.export_root, mine.values()),
             built,
             installed,
+            mod_state: self.dota.as_ref().map_or(ModState::Absent, install::mod_state),
             valve_enabled: self.dota.as_ref().and_then(|d| d.voice_pak()).is_some_and(|v| v.enabled),
             has_changes: self.dota.as_ref().is_some_and(install::has_changes),
             dota_running: install::is_dota_running(),
@@ -211,6 +222,10 @@ impl App {
                 GameAction::Install => install::Plan::for_install(&dota)
                     .and_then(|plan| install::install(&plan, &built))
                     .map(|()| "Установлено. Запусти Доту — новые фразы подхватятся при старте".to_owned()),
+                GameAction::Enable => install::set_enabled(&dota, true)
+                    .map(|_| "Мод включён — перезапусти Доту, чтобы услышать свои фразы".to_owned()),
+                GameAction::Disable => install::set_enabled(&dota, false)
+                    .map(|_| "Мод выключен — в игре озвучка Valve. Включить обратно можно в любой момент".to_owned()),
                 GameAction::Rollback => install::rollback(&dota).map(|done| done.join(". ")),
             };
             let _ = tx.send(result.map_err(|e| format!("{e:#}")));
@@ -228,7 +243,7 @@ impl App {
         let width = ui.available_width().min(680.0);
         let current = if snap.mine == 0 || snap.needs_rebuild() {
             1
-        } else if !snap.installed_ok() {
+        } else if !snap.installed_ok() || snap.mod_state == ModState::Disabled {
             2
         } else {
             3
@@ -254,8 +269,6 @@ impl App {
                 self.step_launch(ui, &snap, current, state(3));
                 ui.add_space(22.0);
                 self.exchange_card(ui);
-                ui.add_space(14.0);
-                self.build_details(ui);
             });
         });
         self.build.snapshot = Some(snap);
@@ -317,24 +330,20 @@ impl App {
         step_card(ui, 2, state, |ui| {
             ui.horizontal(|ui| {
                 ui.label(theme::title("Установить в игру", 15.0));
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if snap.installed_ok() {
-                        theme::pill(ui, "установлено", GREEN);
-                    } else if snap.installed != Installed::No && snap.valve_enabled {
-                        theme::pill(ui, "Steam вернул озвучку Valve", AMBER);
-                    } else if snap.installed == Installed::Other {
-                        theme::pill(ui, "в игре старая версия", AMBER);
-                    } else {
-                        theme::pill(ui, "не установлено", MUTED);
-                    }
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| match snap.mod_state {
+                    ModState::Absent => theme::pill(ui, "не установлено", MUTED),
+                    ModState::Disabled => theme::pill(ui, "мод выключен", MUTED),
+                    ModState::Enabled if snap.valve_enabled => theme::pill(ui, "Steam вернул озвучку Valve", AMBER),
+                    ModState::Enabled if snap.installed == Installed::Other => theme::pill(ui, "в игре старая версия", AMBER),
+                    ModState::Enabled => theme::pill(ui, "мод включён", GREEN),
                 });
             });
             let Some(dota) = self.dota.clone() else {
-                ui.label(theme::small("Дота не найдена в библиотеках Steam."));
+                ui.label(theme::small("Дота не найдена в библиотеках Steam — укажи её папку в настройках."));
                 return;
             };
-            let lang = dota.audio_language.clone().unwrap_or_else(|| "английская".into());
-            ui.label(theme::small(format!("Dota 2 · озвучка {lang}. Перед установкой закрой Доту.")));
+            let lang = game::language_name(dota.voice_language.as_deref());
+            ui.label(theme::small(format!("Dota 2 · озвучка {lang}. Перед изменениями закрой Доту.")));
             ui.add_space(4.0);
 
             if self.build.game_task.is_some() {
@@ -345,64 +354,114 @@ impl App {
                 return;
             }
             match self.build.confirm {
+                None if snap.mod_state == ModState::Absent => {
+                    let can_install = snap.built.is_some();
+                    if ui.add_enabled(can_install, theme::primary(format!("{}  Установить", icon::DOWNLOAD_SIMPLE))).clicked() {
+                        self.ask(GameAction::Install);
+                    }
+                    if snap.has_changes {
+                        // Нашего пака нет, но пак Valve отключён — например, его удалили руками.
+                        if theme::ghost(ui, true, format!("{}  Вернуть озвучку Valve", icon::ARROW_COUNTER_CLOCKWISE)).clicked() {
+                            self.ask(GameAction::Rollback);
+                        }
+                    }
+                }
                 None => {
-                    ui.horizontal(|ui| {
-                        let install_btn = theme::primary(format!("{}  Установить", icon::DOWNLOAD_SIMPLE));
-                        let can_install = snap.built.is_some() && !snap.installed_ok();
-                        if ui.add_enabled(can_install, install_btn).clicked() {
-                            self.build.confirm = Some(GameAction::Install);
-                            self.build.game_result = None;
-                            self.build.dota_running = install::is_dota_running();
-                        }
-                        let rollback = theme::ghost(ui, snap.has_changes, format!("{}  Откатить", icon::ARROW_COUNTER_CLOCKWISE));
-                        if rollback.on_hover_text("Убрать наш пак и вернуть озвучку Valve").clicked() {
-                            self.build.confirm = Some(GameAction::Rollback);
-                            self.build.game_result = None;
-                            self.build.dota_running = install::is_dota_running();
-                        }
-                    });
-                }
-                Some(action) => {
-                    let steps = match action {
-                        GameAction::Install => install::Plan::for_install(&dota).map(|p| p.describe()),
-                        GameAction::Rollback => Ok(vec![
-                            format!("Удалить {} из папки языка", install::PAK_NAME),
-                            "Вернуть pak01_dir.vpk — озвучку Valve".to_owned(),
-                        ]),
+                    if let Some(action) = mod_switch(ui, snap.mine_audible()) {
+                        self.ask(action);
+                    }
+                    let text = if snap.mine_audible() {
+                        "Слышны твои фразы, остальное — оригинал."
+                    } else if snap.mod_state == ModState::Disabled {
+                        "Пак лежит в игре выключенным — включится мгновенно, без пересборки."
+                    } else {
+                        "Пак Valve снова включён и перекрывает твой — включи мод обратно."
                     };
-                    egui::Frame::default().fill(BG_DEEP).corner_radius(8).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        match steps {
-                            Ok(steps) => {
-                                ui.label(RichText::new("Что изменится в папке игры:").size(12.0).color(TEXT));
-                                for step in steps {
-                                    ui.label(theme::small(format!("•  {step}")));
-                                }
-                                if self.build.dota_running {
-                                    ui.label(RichText::new(format!("{}  Дота запущена — закрой её, иначе файлы заняты", icon::WARNING)).size(12.0).color(RED));
-                                }
-                                ui.add_space(4.0);
-                                ui.horizontal(|ui| {
-                                    let label = if action == GameAction::Install { "Установить" } else { "Откатить" };
-                                    if ui.add(theme::primary(label)).clicked() {
-                                        self.start_game_action(ctx, action);
-                                    }
-                                    if theme::ghost(ui, true, "Отмена").clicked() {
-                                        self.build.confirm = None;
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                ui.label(RichText::new(format!("{e:#}")).size(12.0).color(RED));
-                                if theme::ghost(ui, true, "Закрыть").clicked() {
-                                    self.build.confirm = None;
-                                }
-                            }
+                    ui.label(theme::small(text));
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        let stale = snap.built.is_some() && snap.installed != Installed::Same;
+                        if stale && ui.add(theme::primary(format!("{}  Обновить пак", icon::ARROWS_CLOCKWISE))).on_hover_text("Положить в игру свежую сборку").clicked() {
+                            self.ask(GameAction::Install);
                         }
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            let remove = theme::ghost(ui, true, format!("{}  Убрать из игры", icon::TRASH));
+                            if remove.on_hover_text("Удалить наш пак из игры совсем и вернуть озвучку Valve").clicked() {
+                                self.ask(GameAction::Rollback);
+                            }
+                        });
                     });
                 }
+                Some(action) => self.confirm_box(ui, ctx, &dota, action),
             }
             result_line(ui, self.build.game_result.as_ref());
+        });
+    }
+
+    fn ask(&mut self, action: GameAction) {
+        self.build.confirm = Some(action);
+        self.build.game_result = None;
+        self.build.dota_running = install::is_dota_running();
+    }
+
+    /// Что изменится в папке игры — и кнопки «сделать» / «отмена».
+    fn confirm_box(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, dota: &game::DotaInstall, action: GameAction) {
+        let valve_on = dota.voice_pak().is_some_and(|v| v.enabled);
+        let steps = match action {
+            GameAction::Install => install::Plan::for_install(dota).map(|p| p.describe()),
+            GameAction::Enable => {
+                let mut steps = Vec::new();
+                if install::mod_state(dota) == ModState::Disabled {
+                    steps.push(format!("Переименовать {} в {} — включить мой пак", install::PAK_OFF, install::PAK_NAME));
+                }
+                if valve_on {
+                    steps.push("Переименовать pak01_dir.vpk в pak01_dir.vpk.off — отключить озвучку Valve".to_owned());
+                }
+                Ok(steps)
+            }
+            GameAction::Disable => Ok(vec![
+                format!("Переименовать {} в {} — мой пак остаётся в игре, но не грузится", install::PAK_NAME, install::PAK_OFF),
+                "Вернуть pak01_dir.vpk — озвучку Valve".to_owned(),
+            ]),
+            GameAction::Rollback => Ok(vec![
+                format!("Удалить наш пак ({}) из папки языка", install::PAK_NAME),
+                "Вернуть pak01_dir.vpk — озвучку Valve".to_owned(),
+            ]),
+        };
+        egui::Frame::default().fill(BG_DEEP).corner_radius(8).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match steps {
+                Ok(steps) => {
+                    ui.label(RichText::new("Что изменится в папке игры:").size(12.0).color(TEXT));
+                    for step in steps {
+                        ui.label(theme::small(format!("•  {step}")));
+                    }
+                    if self.build.dota_running {
+                        ui.label(RichText::new(format!("{}  Дота запущена — закрой её, иначе файлы заняты", icon::WARNING)).size(12.0).color(RED));
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let label = match action {
+                            GameAction::Install => "Установить",
+                            GameAction::Enable => "Включить",
+                            GameAction::Disable => "Выключить",
+                            GameAction::Rollback => "Убрать из игры",
+                        };
+                        if ui.add(theme::primary(label)).clicked() {
+                            self.start_game_action(ctx, action);
+                        }
+                        if theme::ghost(ui, true, "Отмена").clicked() {
+                            self.build.confirm = None;
+                        }
+                    });
+                }
+                Err(e) => {
+                    ui.label(RichText::new(format!("{e:#}")).size(12.0).color(RED));
+                    if theme::ghost(ui, true, "Закрыть").clicked() {
+                        self.build.confirm = None;
+                    }
+                }
+            }
         });
     }
 
@@ -415,6 +474,7 @@ impl App {
                 }
             });
             let (text, color) = match (current, snap.dota_running) {
+                _ if snap.mod_state == ModState::Disabled => ("Мод выключен — в игре будет озвучка Valve. Включи его на шаге 2, чтобы слышать свои фразы.", MUTED),
                 (3, true) => ("Дота уже открыта. Игра читает паки только при старте — закрой её и запусти заново, чтобы услышать новые фразы.", AMBER),
                 (3, false) => ("Всё готово — запускай. Новые фразы подхватятся при старте игры.", MUTED),
                 _ => ("Сначала собери и установи пак — иначе в игре будет прежняя озвучка.", MUTED),
@@ -503,34 +563,6 @@ impl App {
         self.select(self.selected);
         self.build.refresh_now();
     }
-
-    fn build_details(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new(theme::small("Подробнее: где лежат файлы")).id_salt("build_details").show(ui, |ui| {
-            let mut rows: Vec<(&str, PathBuf)> = Vec::new();
-            if let Some(p) = &self.project {
-                rows.push(("Твои фразы", p.export_root.join(&p.resource_dir)));
-            }
-            if let Some(b) = self.built_pak() {
-                rows.push(("Собранный пак", b));
-            }
-            if let Some(d) = &self.dota {
-                if let Some(v) = d.voice_pak() {
-                    rows.push((if v.enabled { "Озвучка Valve (включена)" } else { "Озвучка Valve (отключена)" }, v.path));
-                }
-                if let Some(l) = d.language_dir() {
-                    rows.push(("Папка модов в игре", l));
-                }
-            }
-            for (label, path) in rows {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).size(12.0).color(FAINT));
-                    if ui.add(egui::Button::new(RichText::new(path.display().to_string()).size(12.0).color(MUTED)).frame(false)).on_hover_text("Показать в проводнике").clicked() {
-                        reveal(&path);
-                    }
-                });
-            }
-        });
-    }
 }
 
 /// Карточка шага с кружком-номером слева.
@@ -565,6 +597,35 @@ fn step_card(ui: &mut egui::Ui, n: u8, state: StepState, add: impl FnOnce(&mut e
             });
         });
     });
+}
+
+/// Переключатель «Моя озвучка / Озвучка Valve». Возвращает действие, если выбрали другое.
+fn mod_switch(ui: &mut egui::Ui, mine: bool) -> Option<GameAction> {
+    let mut action = None;
+    egui::Frame::default().fill(BG_DEEP).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(10).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.horizontal(|ui| {
+            let half = (ui.available_width() - 2.0) / 2.0;
+            let options = [
+                (true, format!("{}  Моя озвучка", icon::MICROPHONE), GOLD, GameAction::Enable),
+                (false, "Озвучка Valve".to_owned(), TEXT, GameAction::Disable),
+            ];
+            for (is_mine, label, color, act) in options {
+                let on = is_mine == mine;
+                let text = RichText::new(label).size(13.0).color(if on { color } else { MUTED });
+                let fill = match (on, is_mine) {
+                    (true, true) => GOLD.gamma_multiply(0.14),
+                    (true, false) => theme::CARD,
+                    _ => Color32::TRANSPARENT,
+                };
+                let btn = egui::Button::new(text).fill(fill).stroke(Stroke::NONE).corner_radius(8).min_size(vec2(half, 30.0));
+                if ui.add(btn).clicked() && !on {
+                    action = Some(act);
+                }
+            }
+        });
+    });
+    action
 }
 
 fn result_line(ui: &mut egui::Ui, result: Option<&Result<String, String>>) {
