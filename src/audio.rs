@@ -20,6 +20,7 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use crate::{tr, trf};
 
 pub const RATE: u32 = 44100;
 const PEAK_BINS: usize = 2048;
@@ -120,7 +121,7 @@ pub fn decode_file(path: &Path) -> Result<Vec<f32>> {
     if crate::opus::is_ogg_opus(path) {
         return crate::opus::decode_file(path);
     }
-    let file = File::open(path).with_context(|| format!("не открывается {}", path.display()))?;
+    let file = File::open(path).with_context(|| trf!("не открывается {}", "can't open {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -128,18 +129,18 @@ pub fn decode_file(path: &Path) -> Result<Vec<f32>> {
     }
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-        .with_context(|| format!("неизвестный формат: {}", path.display()))?;
+        .with_context(|| trf!("неизвестный формат: {}", "unknown format: {}", path.display()))?;
     let mut format = probed.format;
     let track = format
         .tracks()
         .iter()
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .context("в файле нет аудиодорожки")?;
+        .context(tr!("в файле нет аудиодорожки", "the file has no audio track"))?;
     let track_id = track.id;
-    let rate = track.codec_params.sample_rate.context("неизвестна частота дискретизации")?;
+    let rate = track.codec_params.sample_rate.context(tr!("неизвестна частота дискретизации", "unknown sample rate"))?;
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .context("кодек не поддерживается")?;
+        .context(tr!("кодек не поддерживается", "codec not supported"))?;
 
     let mut mono = Vec::new();
     loop {
@@ -172,7 +173,7 @@ pub fn resample(input: &[f32], from: u32, to: u32) -> Result<Vec<f32>> {
         return Ok(input.to_vec());
     }
     let mut r = FftFixedIn::<f32>::new(from as usize, to as usize, 1024, 2, 1)
-        .map_err(|e| anyhow!("ресемплер: {e}"))?;
+        .map_err(|e| anyhow!(trf!("ресемплер: {e}", "resampler: {e}")))?;
     let expected = (input.len() as u64 * to as u64 / from as u64) as usize;
     let mut out = Vec::with_capacity(expected + 2048);
     let mut pos = 0;
@@ -181,16 +182,16 @@ pub fn resample(input: &[f32], from: u32, to: u32) -> Result<Vec<f32>> {
         if pos + need > input.len() {
             break;
         }
-        let chunk = r.process(&[&input[pos..pos + need]], None).map_err(|e| anyhow!("ресемплер: {e}"))?;
+        let chunk = r.process(&[&input[pos..pos + need]], None).map_err(|e| anyhow!(trf!("ресемплер: {e}", "resampler: {e}")))?;
         out.extend_from_slice(&chunk[0]);
         pos += need;
     }
     if pos < input.len() {
-        let chunk = r.process_partial(Some(&[&input[pos..]]), None).map_err(|e| anyhow!("ресемплер: {e}"))?;
+        let chunk = r.process_partial(Some(&[&input[pos..]]), None).map_err(|e| anyhow!(trf!("ресемплер: {e}", "resampler: {e}")))?;
         out.extend_from_slice(&chunk[0]);
     }
     // Хвост, застрявший в задержке ресемплера.
-    let tail = r.process_partial::<&[f32]>(None, None).map_err(|e| anyhow!("ресемплер: {e}"))?;
+    let tail = r.process_partial::<&[f32]>(None, None).map_err(|e| anyhow!(trf!("ресемплер: {e}", "resampler: {e}")))?;
     out.extend_from_slice(&tail[0]);
     let delay = r.output_delay().min(out.len());
     out.drain(..delay);
@@ -232,15 +233,15 @@ pub struct Player {
 
 impl Player {
     pub fn new() -> Result<Self> {
-        let device = cpal::default_host().default_output_device().context("нет устройства вывода звука")?;
-        let config = device.default_output_config().context("устройство вывода не отдаёт настройки")?;
+        let device = cpal::default_host().default_output_device().context(tr!("нет устройства вывода звука", "no audio output device"))?;
+        let config = device.default_output_config().context(tr!("устройство вывода не отдаёт настройки", "the output device doesn't report its settings"))?;
         let state = Arc::new(Mutex::new(PlayState::default()));
         let step = RATE as f64 / config.sample_rate().0 as f64;
         let stream = match config.sample_format() {
             SampleFormat::F32 => build_output::<f32>(&device, &config.into(), state.clone(), step)?,
             SampleFormat::I16 => build_output::<i16>(&device, &config.into(), state.clone(), step)?,
             SampleFormat::U16 => build_output::<u16>(&device, &config.into(), state.clone(), step)?,
-            other => return Err(anyhow!("формат вывода {other:?} не поддерживается")),
+            other => return Err(anyhow!(trf!("формат вывода {other:?} не поддерживается", "output format {other:?} isn't supported"))),
         };
         stream.play()?;
         Ok(Self { _stream: stream, state })
@@ -336,17 +337,17 @@ impl Recorder {
             Some(n) => host
                 .input_devices()?
                 .find(|d| d.name().is_ok_and(|dn| dn == n))
-                .with_context(|| format!("микрофон «{n}» не найден"))?,
-            None => host.default_input_device().context("нет микрофона")?,
+                .with_context(|| trf!("микрофон «{n}» не найден", "microphone “{n}” not found"))?,
+            None => host.default_input_device().context(tr!("нет микрофона", "no microphone"))?,
         };
-        let device_name = device.name().unwrap_or_else(|_| "микрофон".into());
-        let config = device.default_input_config().context("микрофон не отдаёт настройки")?;
+        let device_name = device.name().unwrap_or_else(|_| tr!("микрофон", "microphone").into());
+        let config = device.default_input_config().context(tr!("микрофон не отдаёт настройки", "the microphone doesn't report its settings"))?;
         let state = Arc::new(Mutex::new(RecState::default()));
         let stream = match config.sample_format() {
             SampleFormat::F32 => build_input::<f32>(&device, &config.clone().into(), state.clone())?,
             SampleFormat::I16 => build_input::<i16>(&device, &config.clone().into(), state.clone())?,
             SampleFormat::U16 => build_input::<u16>(&device, &config.clone().into(), state.clone())?,
-            other => return Err(anyhow!("формат микрофона {other:?} не поддерживается")),
+            other => return Err(anyhow!(trf!("формат микрофона {other:?} не поддерживается", "microphone format {other:?} isn't supported"))),
         };
         stream.play()?;
         Ok(Self { _stream: stream, state, device_rate: config.sample_rate().0, device_name })

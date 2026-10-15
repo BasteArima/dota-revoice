@@ -8,6 +8,7 @@ use super::theme::{self, AMBER, BG_DEEP, CARD_HOVER, FAINT, GOLD, GREEN, LINE, M
 use super::build::ago;
 use super::{App, Handle, MIN_TRIM_SAMPLES, Pending, TrimDrag, index_to_secs, prefix_of};
 use crate::config::PreRoll;
+use dota_revoice::{tr, trf};
 
 const WAVE_HEIGHT: f32 = 62.0;
 
@@ -15,13 +16,13 @@ impl App {
     pub(super) fn line_list(&mut self, ui: &mut egui::Ui) {
         let Some(p) = &self.project else {
             ui.add_space(8.0);
-            ui.label(theme::small("Выбери героя на вкладке «Герои»"));
+            ui.label(theme::small(tr!("Выбери героя на вкладке «Герои»", "Pick a hero on the Heroes tab")));
             return;
         };
         egui::TopBottomPanel::bottom("legend").frame(egui::Frame::default()).show_inside(ui, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                for (status, text) in [(Status::Recorded, "записано"), (Status::Redo, "переделать"), (Status::Empty, "пусто")] {
+                for (status, text) in [(Status::Recorded, tr!("записано", "recorded")), (Status::Redo, tr!("переделать", "redo")), (Status::Empty, tr!("пусто", "empty"))] {
                     let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
                     ui.painter().circle_filled(dot.center(), 3.5, status_color(status));
                     ui.label(theme::small(text));
@@ -36,7 +37,7 @@ impl App {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search)
                         .frame(false)
-                        .hint_text(RichText::new("Имя, категория или заметка").color(FAINT))
+                        .hint_text(RichText::new(tr!("Имя, категория или заметка", "Name, category or note")).color(FAINT))
                         .desired_width(f32::INFINITY),
                 );
             });
@@ -44,7 +45,7 @@ impl App {
         ui.add_space(8.0);
         let (done, total) = (p.recorded_count(), p.lines.len());
         ui.horizontal(|ui| {
-            ui.label(theme::small("Записано"));
+            ui.label(theme::small(tr!("Записано", "Recorded")));
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| ui.label(theme::small(format!("{done} / {total}"))));
         });
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 4.0), Sense::hover());
@@ -118,13 +119,13 @@ impl App {
         let Some(line) = self.current_line() else {
             ui.vertical_centered(|ui| {
                 ui.add_space(150.0);
-                ui.label(theme::title("Выбери героя", 22.0));
-                ui.label(theme::small("Фразы программа достанет из игры сама"));
+                ui.label(theme::title(tr!("Выбери героя", "Pick a hero"), 22.0));
+                ui.label(theme::small(tr!("Фразы программа достанет из игры сама", "The app extracts the lines from the game")));
                 ui.add_space(14.0);
-                if ui.add(theme::primary(format!("{}  К героям", icon::USERS_THREE))).clicked() {
+                if ui.add(theme::primary(trf!("{}  К героям", "{}  To heroes", icon::USERS_THREE))).clicked() {
                     self.screen = super::Screen::Heroes;
                 }
-                if theme::ghost(ui, true, "или открыть свою папку со звуками…").clicked() {
+                if theme::ghost(ui, true, tr!("или открыть свою папку со звуками…", "or open your own sound folder…")).clicked() {
                     self.pick_folder();
                 }
             });
@@ -139,36 +140,36 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new(line.name.as_str()).font(FontId::monospace(19.0)).color(TEXT));
             match status {
-                Status::Empty => theme::pill(ui, "пусто", MUTED),
-                Status::Recorded => theme::pill(ui, "записано", GREEN),
-                Status::Redo => theme::pill(ui, "переделать", AMBER),
+                Status::Empty => theme::pill(ui, tr!("пусто", "empty"), MUTED),
+                Status::Recorded => theme::pill(ui, tr!("записано", "recorded"), GREEN),
+                Status::Redo => theme::pill(ui, tr!("переделать", "redo"), AMBER),
             }
             if status != Status::Empty && !recording {
                 ui.add_space(6.0);
                 let redo = status == Status::Redo;
-                let (text, color) = if redo { ("Готово, не переделывать", AMBER) } else { ("Пометить: переделать", MUTED) };
+                let (text, color) = if redo { (tr!("Готово, не переделывать", "Done, no redo"), AMBER) } else { (tr!("Пометить: переделать", "Mark: redo"), MUTED) };
                 if theme::ghost_colored(ui, true, format!("{}  {text}", icon::FLAG), color).clicked() {
                     self.set_redo(!redo);
                 }
-                if theme::ghost(ui, true, format!("{}  В корзину", icon::TRASH)).on_hover_text("Моя версия уйдёт в export/.trash (Del)").clicked() {
+                if theme::ghost(ui, true, trf!("{}  В корзину", "{}  To trash", icon::TRASH)).on_hover_text(tr!("Моя версия уйдёт в export/.trash (Del)", "My version goes to export/.trash (Del)")).clicked() {
                     self.trash_current();
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                if theme::ghost(ui, true, format!("Следующая пустая  {}", icon::SKIP_FORWARD)).on_hover_text("N").clicked() {
+                if theme::ghost(ui, true, trf!("Следующая пустая  {}", "Next empty  {}", icon::SKIP_FORWARD)).on_hover_text("N").clicked() {
                     self.next_unrecorded();
                 }
-                if ui.add(egui::Button::new(icon::CARET_RIGHT).min_size(vec2(30.0, 28.0))).on_hover_text("Следующая (↓)").clicked() {
+                if ui.add(egui::Button::new(icon::CARET_RIGHT).min_size(vec2(30.0, 28.0))).on_hover_text(tr!("Следующая (↓)", "Next (↓)")).clicked() {
                     self.step(1);
                 }
-                if ui.add(egui::Button::new(icon::CARET_LEFT).min_size(vec2(30.0, 28.0))).on_hover_text("Предыдущая (↑)").clicked() {
+                if ui.add(egui::Button::new(icon::CARET_LEFT).min_size(vec2(30.0, 28.0))).on_hover_text(tr!("Предыдущая (↑)", "Previous (↑)")).clicked() {
                     self.step(-1);
                 }
             });
         });
         let orig_secs = self.original.as_ref().map_or(0.0, |c| c.duration_secs());
         ui.horizontal(|ui| {
-            ui.label(theme::small(format!("{} · {orig_secs:.1} с ·", project::category_label(&line.category))));
+            ui.label(theme::small(trf!("{} · {orig_secs:.1} с ·", "{} · {orig_secs:.1} s ·", project::category_label(&line.category))));
             ui.label(RichText::new(icon::PENCIL_SIMPLE).size(12.0).color(FAINT));
             // Заметка: тихая строка, которую можно поправить в любой момент.
             let resp = ui.add(
@@ -176,7 +177,7 @@ impl App {
                     .frame(false)
                     .font(FontId::proportional(12.0))
                     .text_color(MUTED)
-                    .hint_text(RichText::new("заметка для себя: что это за фраза").size(12.0).color(FAINT))
+                    .hint_text(RichText::new(tr!("заметка для себя: что это за фраза", "a note for yourself: what this line is")).size(12.0).color(FAINT))
                     .desired_width(f32::INFINITY),
             );
             if resp.lost_focus() {
@@ -195,7 +196,7 @@ impl App {
 
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(theme::small("Оригинал"));
+                ui.label(theme::small(tr!("Оригинал", "Original")));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if let Some(c) = &self.original {
                         ui.label(theme::small(format!("{:.1} LUFS", c.loudness)));
@@ -203,7 +204,7 @@ impl App {
                 });
             });
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), WAVE_HEIGHT), Sense::click());
-            let inner = theme::paint_bars(ui, rect, self.original.as_ref().map(|c| c.peaks.as_slice()), orig_secs / timeline, WAVE, "Оригинал не загружен");
+            let inner = theme::paint_bars(ui, rect, self.original.as_ref().map(|c| c.peaks.as_slice()), orig_secs / timeline, WAVE, tr!("Оригинал не загружен", "Original not loaded"));
             if let Some(f) = head(Track::Original) {
                 playhead(ui, rect, inner.left() + inner.width() * (orig_secs / timeline) * f);
             }
@@ -215,47 +216,47 @@ impl App {
 
         theme::card_with(ui, if recording { RED } else { LINE }, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Моя версия").size(12.0).color(TEXT));
+                ui.label(RichText::new(tr!("Моя версия", "My version")).size(12.0).color(TEXT));
                 if !self.takes.is_empty() && !recording {
                     self.takes_menu(ui);
                 }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if recording {
-                        ui.label(RichText::new(format!("●  запись {mine_secs:.1} с")).size(12.0).color(RED));
+                        ui.label(RichText::new(trf!("●  запись {mine_secs:.1} с", "●  recording {mine_secs:.1} s")).size(12.0).color(RED));
                     } else if let Some(pending) = self.pending {
                         let text = match pending {
                             Pending::Countdown { started, .. } => {
                                 let left = if started.is_nan() { 3.0 } else { 3.0 - (ui.input(|i| i.time) - started) };
-                                format!("приготовься… {}", left.ceil().max(1.0))
+                                trf!("приготовься… {}", "get ready… {}", left.ceil().max(1.0))
                             }
-                            Pending::Original { .. } => "слушай оригинал, запись начнётся после него".to_owned(),
+                            Pending::Original { .. } => tr!("слушай оригинал, запись начнётся после него", "listen to the original, recording starts after it").to_owned(),
                         };
                         ui.label(RichText::new(text).size(12.0).color(AMBER));
                     } else if let (Some(m), Some(o)) = (&self.mine, &self.original) {
                         let diff = m.loudness - o.loudness;
                         let (hint, color) = if diff.abs() < 2.0 {
-                            ("≈ как оригинал".to_owned(), GREEN)
+                            (tr!("≈ как оригинал", "≈ like the original").to_owned(), GREEN)
                         } else if diff < 0.0 {
-                            (format!("тише на {:.1} dB", -diff), AMBER)
+                            (trf!("тише на {:.1} dB", "{:.1} dB quieter", -diff), AMBER)
                         } else {
-                            (format!("громче на {diff:.1} dB"), AMBER)
+                            (trf!("громче на {diff:.1} dB", "{diff:.1} dB louder"), AMBER)
                         };
                         ui.label(RichText::new(hint).size(12.0).color(color));
                         ui.label(theme::small(format!("{:.1} LUFS ·", m.loudness)));
-                        ui.label(theme::small(format!("{:.1} с ·", m.duration_secs())));
+                        ui.label(theme::small(trf!("{:.1} с ·", "{:.1} s ·", m.duration_secs())));
                         if let Some(full) = &self.mine_full
                             && m.samples.len() < full.samples.len()
                         {
-                            ui.label(theme::small(format!("{} из {:.1} с ·", icon::SCISSORS, full.duration_secs())));
+                            ui.label(theme::small(trf!("{} из {:.1} с ·", "{} of {:.1} s ·", icon::SCISSORS, full.duration_secs())));
                         }
                         if self.fx.gain_db != 0.0 {
                             ui.label(theme::small(format!("{:+.1} dB ·", self.fx.gain_db)));
                         }
                         if self.fx.denoise {
-                            ui.label(theme::small("шумодав ·"));
+                            ui.label(theme::small(tr!("шумодав ·", "denoise ·")));
                         }
                         if self.fx.pitch != 0.0 {
-                            ui.label(theme::small(format!("тон {:+.0} ·", self.fx.pitch)));
+                            ui.label(theme::small(trf!("тон {:+.0} ·", "pitch {:+.0} ·", self.fx.pitch)));
                         }
                     }
                 });
@@ -288,12 +289,12 @@ impl App {
             egui::Frame::default().fill(theme::PANEL).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(12).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
                 // Высоту строки задаём до первой подписи — иначе она прилипает к верху.
                 ui.set_min_height(30.0);
-                ui.label(RichText::new("Новая запись:").size(13.0).color(MUTED));
+                ui.label(RichText::new(tr!("Новая запись:", "New recording:")).size(13.0).color(MUTED));
                 let mut changed = false;
                 for (value, text) in [
-                    (&mut self.config.auto_trim, "убрать тишину"),
-                    (&mut self.config.auto_level, "подогнать громкость"),
-                    (&mut self.config.denoise_new, "шумодав"),
+                    (&mut self.config.auto_trim, tr!("убрать тишину", "trim silence")),
+                    (&mut self.config.auto_level, tr!("подогнать громкость", "match loudness")),
+                    (&mut self.config.denoise_new, tr!("шумодав", "denoise")),
                 ] {
                     if theme::chip(ui, *value, text).clicked() {
                         *value = !*value;
@@ -301,7 +302,7 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
-                ui.label(RichText::new("старт:").size(13.0).color(MUTED));
+                ui.label(RichText::new(tr!("старт:", "start:")).size(13.0).color(MUTED));
                 egui::ComboBox::from_id_salt("pre_roll").selected_text(RichText::new(self.config.pre_roll.label()).size(13.0)).show_ui(ui, |ui| {
                     for mode in [PreRoll::Off, PreRoll::Countdown, PreRoll::Original] {
                         changed |= ui.selectable_value(&mut self.config.pre_roll, mode, mode.label()).changed();
@@ -315,7 +316,7 @@ impl App {
 
         ui.add_space(10.0);
         ui.vertical_centered(|ui| {
-            let hints = "Space оригинал · Ctrl+Space моя · R запись · C сравнить · T убрать тишину · L громкость · ↑↓ фразы · N пустая · Esc отмена";
+            let hints = tr!("Space оригинал · Ctrl+Space моя · R запись · C сравнить · T убрать тишину · L громкость · ↑↓ фразы · N пустая · Esc отмена", "Space original · Ctrl+Space mine · R record · C compare · T trim silence · L loudness · ↑↓ lines · N next empty · Esc cancel");
             ui.label(RichText::new(hints).size(11.0).color(FAINT));
         });
     }
@@ -333,23 +334,23 @@ impl App {
             ui.set_min_height(72.0);
             {
                 ui.spacing_mut().item_spacing.x = gap;
-                let compare = egui::Button::new(format!("{}  Сравнить", icon::ARROWS_LEFT_RIGHT)).shortcut_text("C");
-                if ui.add_enabled_ui(can_compare, |ui| ui.add_sized(extra, compare)).inner.on_hover_text("Оригинал, а сразу за ним моя версия").clicked() {
+                let compare = egui::Button::new(trf!("{}  Сравнить", "{}  Compare", icon::ARROWS_LEFT_RIGHT)).shortcut_text("C");
+                if ui.add_enabled_ui(can_compare, |ui| ui.add_sized(extra, compare)).inner.on_hover_text(tr!("Оригинал, а сразу за ним моя версия", "The original, then my version right after")).clicked() {
                     self.toggle_play(Track::Compare);
                 }
-                let orig = format!("{}  Оригинал", if playing_orig { icon::STOP } else { icon::PLAY });
+                let orig = trf!("{}  Оригинал", "{}  Original", if playing_orig { icon::STOP } else { icon::PLAY });
                 if ui.add_sized(main, egui::Button::new(orig).shortcut_text("Space")).clicked() {
                     self.toggle_play(Track::Original);
                 }
                 if self.record_button(ui, recording).clicked() {
                     self.toggle_record();
                 }
-                let mine = format!("{}  Моя", if playing_mine { icon::STOP } else { icon::PLAY });
+                let mine = trf!("{}  Моя", "{}  Mine", if playing_mine { icon::STOP } else { icon::PLAY });
                 if ui.add_enabled_ui(can_play, |ui| ui.add_sized(main, egui::Button::new(mine).shortcut_text("Ctrl+Space"))).inner.clicked() {
                     self.toggle_play(Track::Mine);
                 }
-                let import = egui::Button::new(format!("{}  Из файла", icon::FILE_ARROW_DOWN));
-                if ui.add_enabled_ui(!recording, |ui| ui.add_sized(extra, import)).inner.on_hover_text("mp3, wav, ogg, голосовые Telegram…").clicked() {
+                let import = egui::Button::new(trf!("{}  Из файла", "{}  From file", icon::FILE_ARROW_DOWN));
+                if ui.add_enabled_ui(!recording, |ui| ui.add_sized(extra, import)).inner.on_hover_text(tr!("mp3, wav, ogg, голосовые Telegram…", "mp3, wav, ogg, Telegram voice messages…")).clicked() {
                     self.import_file();
                 }
             }
@@ -390,7 +391,7 @@ impl App {
                 p.text(c, Align2::CENTER_CENTER, glyph, FontId::proportional(26.0), Color32::WHITE);
             }
         }
-        resp.on_hover_text(if recording || self.pending.is_some() { "Остановить (R)" } else { "Записать (R)" })
+        resp.on_hover_text(if recording || self.pending.is_some() { tr!("Остановить (R)", "Stop (R)") } else { tr!("Записать (R)", "Record (R)") })
             .on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
@@ -398,7 +399,7 @@ impl App {
     fn trim_wave(&mut self, ui: &mut egui::Ui, span: f32, head: Option<f32>) -> egui::Response {
         let Some(raw) = self.mine_full.clone() else {
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), WAVE_HEIGHT), Sense::hover());
-            theme::paint_bars(ui, rect, None, span, GOLD, "Нажми R или красную кнопку, чтобы записать");
+            theme::paint_bars(ui, rect, None, span, GOLD, tr!("Нажми R или красную кнопку, чтобы записать", "Press R or the red button to record"));
             return resp;
         };
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), WAVE_HEIGHT), Sense::click_and_drag());
@@ -459,8 +460,8 @@ impl App {
             && let Some(d) = self.drag.take()
         {
             match self.apply_trim(d.range) {
-                Ok(()) => self.info(format!("Обрезка: {:.2}–{:.2} с", index_to_secs(d.range.0), index_to_secs(d.range.1))),
-                Err(e) => self.error(format!("Обрезка не сохранилась: {e:#}")),
+                Ok(()) => self.info(trf!("Обрезка: {:.2}–{:.2} с", "Trim: {:.2}–{:.2} s", index_to_secs(d.range.0), index_to_secs(d.range.1))),
+                Err(e) => self.error(trf!("Обрезка не сохранилась: {e:#}", "Trim wasn't saved: {e:#}")),
             }
         }
         resp
@@ -481,46 +482,46 @@ impl App {
         ui.separator();
         ui.add_space(2.0);
         egui::Grid::new("edit_tools").num_columns(4).spacing([10.0, 8.0]).show(ui, |ui| {
-            label(ui, icon::SCISSORS, "Обрезка");
-            if ui.add_sized(MAIN, theme::tool("Убрать тишину по краям").shortcut_text("T")).clicked() {
+            label(ui, icon::SCISSORS, tr!("Обрезка", "Trim"));
+            if ui.add_sized(MAIN, theme::tool(tr!("Убрать тишину по краям", "Trim silence at the edges")).shortcut_text("T")).clicked() {
                 self.trim_silence();
             }
-            if ui.add_enabled_ui(trimmed, |ui| ui.add_sized(SECOND, theme::tool("Без обрезки"))).inner.clicked() {
+            if ui.add_enabled_ui(trimmed, |ui| ui.add_sized(SECOND, theme::tool(tr!("Без обрезки", "No trim")))).inner.clicked() {
                 self.reset_trim();
             }
             let hint = if trimmed {
-                format!("в игру идёт {:.2}–{:.2} с · края можно двигать", index_to_secs(self.trim.0), index_to_secs(self.trim.1))
+                trf!("в игру идёт {:.2}–{:.2} с · края можно двигать", "{:.2}–{:.2} s goes into the game · drag the edges", index_to_secs(self.trim.0), index_to_secs(self.trim.1))
             } else {
-                "или тяни золотые края на волне".to_owned()
+                tr!("или тяни золотые края на волне", "or drag the gold edges on the wave").to_owned()
             };
             ui.label(RichText::new(hint).size(12.0).color(FAINT));
             ui.end_row();
 
-            label(ui, icon::SPEAKER_HIGH, "Звук");
-            if ui.add_sized(MAIN, theme::tool("Громкость как в оригинале").shortcut_text("L")).clicked() {
+            label(ui, icon::SPEAKER_HIGH, tr!("Звук", "Sound"));
+            if ui.add_sized(MAIN, theme::tool(tr!("Громкость как в оригинале", "Loudness like the original")).shortcut_text("L")).clicked() {
                 self.match_loudness();
             }
             let denoise = self.fx.denoise;
-            let mut btn = theme::tool(format!("{}  Шумодав", if denoise { icon::CHECK_SQUARE } else { icon::SQUARE }));
+            let mut btn = theme::tool(trf!("{}  Шумодав", "{}  Denoise", if denoise { icon::CHECK_SQUARE } else { icon::SQUARE }));
             if denoise {
                 btn = btn.fill(GOLD.gamma_multiply(0.12)).stroke(Stroke::new(1.0_f32, GOLD.gamma_multiply(0.6)));
             }
-            if ui.add_sized(SECOND, btn).on_hover_text("Убрать шум комнаты и фон (RNNoise)").clicked() {
+            if ui.add_sized(SECOND, btn).on_hover_text(tr!("Убрать шум комнаты и фон (RNNoise)", "Remove room noise and background (RNNoise)")).clicked() {
                 self.toggle_denoise();
             }
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Тон").size(13.0).color(MUTED));
+                ui.label(RichText::new(tr!("Тон", "Pitch")).size(13.0).color(MUTED));
                 let pitch = self.fx.pitch;
                 let step = |t: &str| egui::Button::new(RichText::new(t).size(13.0)).min_size(vec2(30.0, 30.0));
-                if ui.add_enabled(pitch > -12.0, step(icon::MINUS)).on_hover_text("На полутон ниже — грубее и массивнее").clicked() {
+                if ui.add_enabled(pitch > -12.0, step(icon::MINUS)).on_hover_text(tr!("На полутон ниже — грубее и массивнее", "A semitone lower — rougher and heavier")).clicked() {
                     self.set_pitch(pitch - 1.0);
                 }
                 let value = if pitch == 0.0 { "0".to_owned() } else { format!("{pitch:+.0}") };
                 ui.add_sized(vec2(26.0, 30.0), egui::Label::new(RichText::new(value).size(13.0).color(if pitch == 0.0 { MUTED } else { GOLD })));
-                if ui.add_enabled(pitch < 12.0, step(icon::PLUS)).on_hover_text("На полутон выше — мельче и звонче").clicked() {
+                if ui.add_enabled(pitch < 12.0, step(icon::PLUS)).on_hover_text(tr!("На полутон выше — мельче и звонче", "A semitone higher — lighter and brighter")).clicked() {
                     self.set_pitch(pitch + 1.0);
                 }
-                if pitch != 0.0 && theme::ghost(ui, true, "сбросить").clicked() {
+                if pitch != 0.0 && theme::ghost(ui, true, tr!("сбросить", "reset")).clicked() {
                     self.set_pitch(0.0);
                 }
             });
@@ -530,23 +531,23 @@ impl App {
 
     /// Выпадающий список прежних дублей: послушать, вернуть, удалить.
     fn takes_menu(&mut self, ui: &mut egui::Ui) {
-        let title = RichText::new(format!("{}  дубли: {}", icon::STACK, self.takes.len())).size(12.0).color(MUTED);
+        let title = RichText::new(trf!("{}  дубли: {}", "{}  takes: {}", icon::STACK, self.takes.len())).size(12.0).color(MUTED);
         let mut action = None;
         ui.menu_button(title, |ui| {
             ui.set_min_width(280.0);
-            ui.label(theme::small("Прежние попытки этой фразы"));
+            ui.label(theme::small(tr!("Прежние попытки этой фразы", "Earlier attempts at this line")));
             for take in &self.takes {
                 ui.horizontal(|ui| {
                     let when = take.saved.map(ago).unwrap_or_default();
-                    ui.label(RichText::new(format!("№{} · {:.1} с · {when}", take.id, take.secs)).size(12.0).color(TEXT));
+                    ui.label(RichText::new(trf!("№{} · {:.1} с · {when}", "#{} · {:.1} s · {when}", take.id, take.secs)).size(12.0).color(TEXT));
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(egui::Button::new(icon::TRASH).frame(false)).on_hover_text("В корзину").clicked() {
+                        if ui.add(egui::Button::new(icon::TRASH).frame(false)).on_hover_text(tr!("В корзину", "To trash")).clicked() {
                             action = Some((take.clone(), TakeAction::Trash));
                         }
-                        if ui.add(egui::Button::new(RichText::new("Вернуть").size(12.0))).on_hover_text("Сделать этот дубль текущим").clicked() {
+                        if ui.add(egui::Button::new(RichText::new(tr!("Вернуть", "Restore")).size(12.0))).on_hover_text(tr!("Сделать этот дубль текущим", "Make this take current")).clicked() {
                             action = Some((take.clone(), TakeAction::Restore));
                         }
-                        if ui.add(egui::Button::new(icon::PLAY).frame(false)).on_hover_text("Послушать как есть").clicked() {
+                        if ui.add(egui::Button::new(icon::PLAY).frame(false)).on_hover_text(tr!("Послушать как есть", "Play as is")).clicked() {
                             action = Some((take.clone(), TakeAction::Play));
                         }
                     });
@@ -589,11 +590,11 @@ impl App {
             let mut filled = rect;
             filled.set_width(rect.width() * frac.clamp(0.0, 1.0));
             p.rect_filled(filled, 2.0, color);
-            let text = if db <= -60.0 { "тихо".to_owned() } else { format!("{db:.0} dB") };
+            let text = if db <= -60.0 { tr!("тихо", "quiet").to_owned() } else { format!("{db:.0} dB") };
             ui.label(RichText::new(text).size(11.0).color(FAINT));
         });
         if self.clipped {
-            ui.label(RichText::new("Перегруз микрофона — отодвинься или убавь усиление и перезапиши").size(12.0).color(RED));
+            ui.label(RichText::new(tr!("Перегруз микрофона — отодвинься или убавь усиление и перезапиши", "Microphone clipping — move back or lower the gain and record again")).size(12.0).color(RED));
         }
     }
 }

@@ -5,6 +5,7 @@ pub mod encode;
 pub mod exchange;
 pub mod game;
 pub mod heroes;
+pub mod i18n;
 pub mod install;
 pub mod mp3;
 pub mod opus;

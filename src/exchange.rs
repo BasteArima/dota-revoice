@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::project::Store;
 use crate::{audio, encode, mp3, pack};
+use crate::{tr, trf};
 
 const MANIFEST: &str = "dota_revoice_pack.json";
 const FORMAT: u32 = 1;
@@ -45,7 +46,7 @@ pub struct ImportSummary {
 /// Собирает все мои фразы (всех героев) в пачку. Возвращает число фраз.
 pub fn export_pack(export_root: &Path, out: &Path) -> Result<usize> {
     let lines = pack::collect_export(export_root)?;
-    ensure!(!lines.is_empty(), "пока нечего отправлять — нет ни одной записанной фразы");
+    ensure!(!lines.is_empty(), tr!("пока нечего отправлять — нет ни одной записанной фразы", "nothing to send yet — no recorded lines"));
     let store = Store::open(export_root);
     let manifest = Manifest {
         format: FORMAT,
@@ -57,7 +58,7 @@ pub fn export_pack(export_root: &Path, out: &Path) -> Result<usize> {
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let file = File::create(out).with_context(|| format!("не создаётся {}", out.display()))?;
+    let file = File::create(out).with_context(|| trf!("не создаётся {}", "can't create {}", out.display()))?;
     let mut zip = zip::ZipWriter::new(file);
     // mp3 уже сжат — кладём как есть.
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -74,8 +75,8 @@ pub fn export_pack(export_root: &Path, out: &Path) -> Result<usize> {
 /// Раскладывает пачку по `export/`. `replace` — заменять фразы, которые у меня уже есть
 /// (моя версия при этом уходит в дубли).
 pub fn import_pack(export_root: &Path, pack_path: &Path, replace: bool) -> Result<ImportSummary> {
-    let file = File::open(pack_path).with_context(|| format!("не открывается {}", pack_path.display()))?;
-    let mut zip = zip::ZipArchive::new(file).context("это не zip-архив")?;
+    let file = File::open(pack_path).with_context(|| trf!("не открывается {}", "can't open {}", pack_path.display()))?;
+    let mut zip = zip::ZipArchive::new(file).context(tr!("это не zip-архив", "this isn't a zip archive"))?;
     let mut store = Store::open(export_root);
     let mut summary = ImportSummary::default();
     let mut manifest = Manifest::default();

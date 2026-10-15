@@ -9,6 +9,7 @@ use eframe::egui::{self, Align, Layout, RichText, vec2};
 use super::theme::{self, AMBER, BG_DEEP, FAINT, GOLD, GREEN, MUTED, RED, TEXT, icon};
 use super::{App, find_dota, open_folder, reveal};
 use crate::config::{Config, UiLanguage};
+use dota_revoice::{tr, trf};
 
 /// Какая папка меняется.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -47,8 +48,8 @@ impl App {
             ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
             ui.vertical(|ui| {
                 ui.set_width(width);
-                ui.label(theme::title("Настройки", 22.0));
-                ui.label(theme::small("Где игра, какую озвучку переделываем и где лежат файлы"));
+                ui.label(theme::title(tr!("Настройки", "Settings"), 22.0));
+                ui.label(theme::small(tr!("Где игра, какую озвучку переделываем и где лежат файлы", "Where the game is, which voice-over you're remaking and where the files live")));
                 ui.add_space(14.0);
                 self.game_card(ui);
                 ui.add_space(10.0);
@@ -64,15 +65,15 @@ impl App {
 
     fn game_card(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
-            card_title(ui, icon::GAME_CONTROLLER, "Игра");
+            card_title(ui, icon::GAME_CONTROLLER, tr!("Игра", "Game"));
             let dota = self.dota.clone();
             let shown = dota.as_ref().map(|d| d.game_dir.parent().unwrap_or(&d.game_dir).to_path_buf());
             let tag = match (&dota, &self.config.dota_dir) {
-                (None, _) => Some(("не найдена", AMBER)),
-                (Some(_), Some(_)) => Some(("указана вручную", MUTED)),
-                (Some(_), None) => Some(("найдена сама", GREEN)),
+                (None, _) => Some((tr!("не найдена", "not found"), AMBER)),
+                (Some(_), Some(_)) => Some((tr!("указана вручную", "set manually"), MUTED)),
+                (Some(_), None) => Some((tr!("найдена сама", "found automatically"), GREEN)),
             };
-            let action = path_row(ui, "Папка Dota 2", tag, shown.as_deref(), self.config.dota_dir.is_some());
+            let action = path_row(ui, tr!("Папка Dota 2", "Dota 2 folder"), tag, shown.as_deref(), self.config.dota_dir.is_some());
             match action {
                 Some(RowAction::Change) => self.pick_dota_dir(),
                 Some(RowAction::Show) => {
@@ -88,12 +89,12 @@ impl App {
             }
 
             let Some(dota) = dota else {
-                ui.label(theme::small("Укажи папку «dota 2 beta» — обычно она в steamapps/common библиотеки Steam."));
+                ui.label(theme::small(tr!("Укажи папку «dota 2 beta» — обычно она в steamapps/common библиотеки Steam.", "Choose the “dota 2 beta” folder — it's usually in steamapps/common of a Steam library.")));
                 return;
             };
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                label_cell(ui, "Озвучка");
+                label_cell(ui, tr!("Озвучка", "Voice-over"));
                 if let Some(lang) = self.voice_language_chips(ui, &dota) {
                     // Совпадает с игрой — не запоминаем: тогда программа идёт за игрой и дальше.
                     self.config.voice_language = (Some(&lang) != dota.audio_language.as_ref()).then_some(lang);
@@ -104,24 +105,24 @@ impl App {
                 label_cell(ui, "");
                 let game_lang = game::language_name(dota.audio_language.as_deref());
                 if dota.audio_mismatch() {
-                    ui.label(RichText::new(format!(
-                        "{}  В игре сейчас включена {game_lang} — мод будет слышно, только если переключить на неё озвучку игры",
+                    ui.label(RichText::new(trf!(
+                        "{}  В игре сейчас включена {game_lang} — мод будет слышно, только если переключить на неё озвучку игры", "{}  The game currently uses {game_lang} — you'll hear the mod only after switching the game's voice-over to this language",
                         icon::WARNING
                     )).size(12.0).color(AMBER));
                 } else {
-                    ui.label(theme::small(format!("В игре сейчас включена {game_lang} — совпадает")));
+                    ui.label(theme::small(trf!("В игре сейчас включена {game_lang} — совпадает", "The game currently uses {game_lang} — it matches")));
                 }
             });
 
             ui.add_space(4.0);
             if let Some(v) = dota.voice_pak() {
-                let label = if v.enabled { "Озвучка Valve" } else { "Озвучка Valve (откл.)" };
+                let label = if v.enabled { tr!("Озвучка Valve", "Valve voice-over") } else { tr!("Озвучка Valve (откл.)", "Valve voice-over (off)") };
                 if let Some(RowAction::Show) = info_row(ui, label, &v.path) {
                     reveal(&v.path);
                 }
             }
             if let Some(dir) = dota.language_dir()
-                && let Some(RowAction::Show) = info_row(ui, "Папка модов", &dir)
+                && let Some(RowAction::Show) = info_row(ui, tr!("Папка модов", "Mods folder"), &dir)
             {
                 open_folder(&dir);
             }
@@ -134,7 +135,7 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             let langs = dota.voice_languages();
             if langs.is_empty() {
-                ui.label(RichText::new("Скачанной озвучки нет — включи язык озвучки в Доте, Steam докачает пак").size(12.0).color(AMBER));
+                ui.label(RichText::new(tr!("Скачанной озвучки нет — включи язык озвучки в Доте, Steam докачает пак", "No voice-over downloaded — pick a voice-over language in Dota and Steam will download the pack")).size(12.0).color(AMBER));
             }
             for lang in langs {
                 let on = dota.voice_language.as_deref() == Some(lang.as_str());
@@ -142,20 +143,32 @@ impl App {
                     picked = Some(lang);
                 }
             }
-            choice_chip(ui, false, false, "Английская β")
-                .on_disabled_hover_text("Английская озвучка лежит в основном паке игры — появится после проверки в игре");
+            choice_chip(ui, false, false, tr!("Английская β", "English β"))
+                .on_disabled_hover_text(tr!("Английская озвучка лежит в основном паке игры — появится после проверки в игре", "English voice-over lives in the game's main pack — coming once it's tested in game"));
         });
         picked
     }
 
+    /// Чипы языка интерфейса: переключают сразу, без перезапуска.
+    pub(super) fn ui_language_chips(&mut self, ui: &mut egui::Ui) {
+        for (lang, label) in [(UiLanguage::Russian, "Русский"), (UiLanguage::English, "English")] {
+            let on = self.config.ui_language == lang;
+            if choice_chip(ui, on, true, label).clicked() && !on {
+                self.config.ui_language = lang;
+                self.config.apply_language();
+                self.config.save();
+            }
+        }
+    }
+
     pub(super) fn pick_dota_dir(&mut self) {
-        let Some(dir) = rfd::FileDialog::new().set_title("Папка «dota 2 beta»").pick_folder() else { return };
+        let Some(dir) = rfd::FileDialog::new().set_title(tr!("Папка «dota 2 beta»", "The “dota 2 beta” folder")).pick_folder() else { return };
         match game::game_dir_of(&dir) {
             Some(game_dir) => {
                 self.config.dota_dir = Some(game_dir.parent().unwrap_or(&game_dir).to_path_buf());
                 self.after_game_change();
             }
-            None => self.settings.result = Some(Err(format!("В {} нет Доты: ищу папку game/dota внутри «dota 2 beta»", dir.display()))),
+            None => self.settings.result = Some(Err(trf!("В {} нет Доты: ищу папку game/dota внутри «dota 2 beta»", "No Dota in {}: looking for game/dota inside “dota 2 beta”", dir.display()))),
         }
     }
 
@@ -170,15 +183,15 @@ impl App {
 
     fn folders_card(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
-            card_title(ui, icon::FOLDERS, "Папки");
+            card_title(ui, icon::FOLDERS, tr!("Папки", "Folders"));
             let c = &self.config;
             let rows = [
-                (Folder::Library, "Рабочая папка", c.library_dir(), c.library.is_some()),
-                (Folder::Export, "Мои фразы", c.export_root(), c.export_dir.is_some()),
-                (Folder::Build, "Собранный пак", c.build_root(), c.build_dir.is_some()),
+                (Folder::Library, tr!("Рабочая папка", "Workspace folder"), c.library_dir(), c.library.is_some()),
+                (Folder::Export, tr!("Мои фразы", "My lines"), c.export_root(), c.export_dir.is_some()),
+                (Folder::Build, tr!("Собранный пак", "Built pack"), c.build_root(), c.build_dir.is_some()),
             ];
             for (folder, label, path, custom) in rows {
-                let tag = (!custom).then_some(("по умолчанию", FAINT));
+                let tag = (!custom).then_some((tr!("по умолчанию", "default"), FAINT));
                 match path_row(ui, label, tag, Some(&path), custom) {
                     Some(RowAction::Change) => {
                         if let Some(dir) = rfd::FileDialog::new().set_title(label).set_directory(&path).pick_folder() {
@@ -191,11 +204,11 @@ impl App {
                 }
             }
             let originals = self.config.library_dir().join("originals");
-            if let Some(RowAction::Show) = info_row(ui, "Оригиналы из игры", &originals) {
+            if let Some(RowAction::Show) = info_row(ui, tr!("Оригиналы из игры", "Originals from the game"), &originals) {
                 open_folder(&originals);
             }
             ui.label(theme::small(
-                "Мои фразы по умолчанию лежат в рабочей папке, собранный пак — в моих фразах. Оригиналы программа достаёт из игры сама — их можно удалить, достанутся заново. При смене папки с фразами программа предложит перенести записи.",
+                tr!("Мои фразы по умолчанию лежат в рабочей папке, собранный пак — в моих фразах. Оригиналы программа достаёт из игры сама — их можно удалить, достанутся заново. При смене папки с фразами программа предложит перенести записи.", "By default “My lines” lives in the workspace folder and the built pack inside “My lines”. Originals are extracted from the game automatically — delete them and they'll be extracted again. When you change the lines folder, the app offers to move your recordings."),
             ));
             self.pending_move_box(ui);
             match &self.settings.result {
@@ -248,18 +261,18 @@ impl App {
         let mut answer = None;
         egui::Frame::default().fill(BG_DEEP).corner_radius(8).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("Перенести мои фразы в новую папку?").size(13.0).color(TEXT));
-            ui.label(theme::small(format!("Из  {}", from.display())));
-            ui.label(theme::small(format!("В    {}", to.display())));
+            ui.label(RichText::new(tr!("Перенести мои фразы в новую папку?", "Move my lines to the new folder?")).size(13.0).color(TEXT));
+            ui.label(theme::small(trf!("Из  {}", "From  {}", from.display())));
+            ui.label(theme::small(trf!("В    {}", "To      {}", to.display())));
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.add(theme::primary("Перенести")).clicked() {
+                if ui.add(theme::primary(tr!("Перенести", "Move"))).clicked() {
                     answer = Some(true);
                 }
-                if theme::ghost(ui, true, "Не переносить, начать с пустой").clicked() {
+                if theme::ghost(ui, true, tr!("Не переносить, начать с пустой", "Don't move, start empty")).clicked() {
                     answer = Some(false);
                 }
-                if theme::ghost(ui, true, "Отмена").clicked() {
+                if theme::ghost(ui, true, tr!("Отмена", "Cancel")).clicked() {
                     self.settings.pending_move = None;
                 }
             });
@@ -280,14 +293,13 @@ impl App {
 
     fn interface_card(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
-            card_title(ui, icon::TRANSLATE, "Интерфейс");
+            card_title(ui, icon::TRANSLATE, tr!("Интерфейс", "Interface"));
             ui.horizontal(|ui| {
-                choice_chip(ui, self.config.ui_language == UiLanguage::Russian, true, "Русский");
-                choice_chip(ui, false, false, "English").on_disabled_hover_text("Английский интерфейс — в следующем обновлении");
+                self.ui_language_chips(ui);
             });
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                if theme::chip(ui, self.config.check_updates, "Проверять новые версии").on_hover_text("Раз при запуске, через GitHub").clicked() {
+                if theme::chip(ui, self.config.check_updates, tr!("Проверять новые версии", "Check for new versions")).on_hover_text(tr!("Раз при запуске, через GitHub", "Once at startup, via GitHub")).clicked() {
                     self.config.check_updates = !self.config.check_updates;
                     self.config.save();
                 }
@@ -297,8 +309,8 @@ impl App {
 
     fn recording_card(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
-            card_title(ui, icon::MICROPHONE, "Запись");
-            let current = self.recorder.as_ref().map(|r| r.device_name.clone()).unwrap_or_else(|| "нет микрофона".into());
+            card_title(ui, icon::MICROPHONE, tr!("Запись", "Recording"));
+            let current = self.recorder.as_ref().map(|r| r.device_name.clone()).unwrap_or_else(|| tr!("нет микрофона", "no microphone").into());
             let mut chosen = None;
             egui::ComboBox::from_id_salt("mic")
                 .selected_text(current.as_str())
@@ -314,7 +326,7 @@ impl App {
                 self.open_recorder(Some(name));
                 self.config.save();
             }
-            ui.label(theme::small("Обрезка, громкость, шумодав и отсчёт — чипами на экране записи."));
+            ui.label(theme::small(tr!("Обрезка, громкость, шумодав и отсчёт — чипами на экране записи.", "Trim, loudness, noise reduction and countdown are chips on the Record screen.")));
         });
     }
 
@@ -344,28 +356,28 @@ fn has_files(dir: &Path) -> bool {
 /// Переносит папку целиком. На тот же диск — переименованием, на другой — копией
 /// (старая папка остаётся: удалять записи мы не берёмся).
 fn move_dir(from: &Path, to: &Path) -> Result<String> {
-    ensure!(!has_files(to), "в {} уже есть файлы — выбери пустую папку или не переноси", to.display());
-    ensure!(!to.starts_with(from), "новая папка внутри старой — так перенести нельзя");
+    ensure!(!has_files(to), trf!("в {} уже есть файлы — выбери пустую папку или не переноси", "{} already has files — pick an empty folder or don't move", to.display()));
+    ensure!(!to.starts_with(from), tr!("новая папка внутри старой — так перенести нельзя", "the new folder is inside the old one — can't move like that"));
     if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("не создаётся {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| trf!("не создаётся {}", "can't create {}", parent.display()))?;
     }
     let _ = std::fs::remove_dir(to); // пустая папка мешает переименованию
     if std::fs::rename(from, to).is_ok() {
-        return Ok(format!("Мои фразы перенесены в {}", to.display()));
+        return Ok(trf!("Мои фразы перенесены в {}", "My lines moved to {}", to.display()));
     }
     copy_dir(from, to)?;
-    Ok(format!("Мои фразы скопированы в {} (на другой диск). Старая папка осталась: {}", to.display(), from.display()))
+    Ok(trf!("Мои фразы скопированы в {} (на другой диск). Старая папка осталась: {}", "My lines copied to {} (another drive). The old folder is still there: {}", to.display(), from.display()))
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<()> {
-    std::fs::create_dir_all(to).with_context(|| format!("не создаётся {}", to.display()))?;
-    for entry in std::fs::read_dir(from).with_context(|| format!("не читается {}", from.display()))? {
+    std::fs::create_dir_all(to).with_context(|| trf!("не создаётся {}", "can't create {}", to.display()))?;
+    for entry in std::fs::read_dir(from).with_context(|| trf!("не читается {}", "can't read {}", from.display()))? {
         let entry = entry?;
         let (src, dst) = (entry.path(), to.join(entry.file_name()));
         if src.is_dir() {
             copy_dir(&src, &dst)?;
         } else {
-            std::fs::copy(&src, &dst).with_context(|| format!("не скопировался {}", src.display()))?;
+            std::fs::copy(&src, &dst).with_context(|| trf!("не скопировался {}", "couldn't copy {}", src.display()))?;
         }
     }
     Ok(())
@@ -409,13 +421,13 @@ fn path_row(ui: &mut egui::Ui, label: &str, tag: Option<(&str, egui::Color32)>, 
             }
         });
         path_cell(ui, path, BUTTONS_WIDTH);
-        if theme::ghost(ui, path.is_some(), icon::FOLDER_OPEN).on_hover_text("Открыть папку").clicked() {
+        if theme::ghost(ui, path.is_some(), icon::FOLDER_OPEN).on_hover_text(tr!("Открыть папку", "Open folder")).clicked() {
             action = Some(RowAction::Show);
         }
-        if ui.add(theme::tool("Изменить")).clicked() {
+        if ui.add(theme::tool(tr!("Изменить", "Change"))).clicked() {
             action = Some(RowAction::Change);
         }
-        if can_reset && theme::ghost(ui, true, icon::ARROW_COUNTER_CLOCKWISE).on_hover_text("Вернуть как по умолчанию").clicked() {
+        if can_reset && theme::ghost(ui, true, icon::ARROW_COUNTER_CLOCKWISE).on_hover_text(tr!("Вернуть как по умолчанию", "Reset to default")).clicked() {
             action = Some(RowAction::Reset);
         }
     });
@@ -428,7 +440,7 @@ fn info_row(ui: &mut egui::Ui, label: &str, path: &Path) -> Option<RowAction> {
     ui.horizontal(|ui| {
         label_cell(ui, label);
         path_cell(ui, Some(path), BUTTONS_WIDTH);
-        if theme::ghost(ui, true, icon::FOLDER_OPEN).on_hover_text("Показать в проводнике").clicked() {
+        if theme::ghost(ui, true, icon::FOLDER_OPEN).on_hover_text(tr!("Показать в проводнике", "Show in file manager")).clicked() {
             action = Some(RowAction::Show);
         }
     });

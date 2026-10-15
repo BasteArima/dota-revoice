@@ -5,6 +5,7 @@
 //! (с июльского патча 2026 года — именно он, а не язык интерфейса).
 
 use std::path::{Path, PathBuf};
+use crate::tr;
 
 #[derive(Debug, Clone)]
 pub struct DotaInstall {
@@ -89,11 +90,11 @@ pub fn game_dir_of(dir: &Path) -> Option<PathBuf> {
 /// `russian` → «русская». Названия папок Valve, а не коды языков.
 pub fn language_name(lang: Option<&str>) -> String {
     match lang {
-        None | Some("english") => "английская",
-        Some("russian") => "русская",
-        Some("schinese") => "китайская",
-        Some("koreana") => "корейская",
-        Some("japanese") => "японская",
+        None | Some("english") => tr!("английская", "English"),
+        Some("russian") => tr!("русская", "Russian"),
+        Some("schinese") => tr!("китайская", "Chinese"),
+        Some("koreana") => tr!("корейская", "Korean"),
+        Some("japanese") => tr!("японская", "Japanese"),
         Some(other) => return other.to_owned(),
     }
     .to_owned()

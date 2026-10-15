@@ -3,10 +3,10 @@
 use dota_revoice::game;
 use eframe::egui::{self, Align, Layout, RichText, Sense, vec2};
 
-use super::settings::{choice_chip, path_cell};
+use super::settings::path_cell;
 use super::theme::{self, AMBER, BG_DEEP, GOLD, GREEN, LINE, ON_GOLD, RED, TEXT, icon};
 use super::App;
-use crate::config::UiLanguage;
+use dota_revoice::{tr, trf};
 
 impl App {
     pub(super) fn setup_screen(&mut self, ui: &mut egui::Ui) {
@@ -43,17 +43,17 @@ impl App {
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon::MICROPHONE, egui::FontId::proportional(22.0), ON_GOLD);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(theme::title("Добро пожаловать в Dota Revoice", 18.0));
-                ui.label(theme::small("Три вопроса — и можно записывать. Всё это потом меняется в настройках."));
+                ui.label(theme::title(tr!("Добро пожаловать в Dota Revoice", "Welcome to Dota Revoice"), 18.0));
+                ui.label(theme::small(tr!("Три вопроса — и можно записывать. Всё это потом меняется в настройках.", "Three questions and you're ready to record. You can change all of it later in the settings.")));
             });
         });
     }
 
     fn setup_game(&mut self, ui: &mut egui::Ui) {
         let badge = match (&self.dota, &self.config.dota_dir) {
-            (None, _) => RichText::new("не найдена").color(AMBER),
-            (Some(_), Some(_)) => RichText::new(format!("{}  указана", icon::CHECK)).color(GREEN),
-            (Some(_), None) => RichText::new(format!("{}  найдена", icon::CHECK)).color(GREEN),
+            (None, _) => RichText::new(tr!("не найдена", "not found")).color(AMBER),
+            (Some(_), Some(_)) => RichText::new(trf!("{}  указана", "{}  set manually", icon::CHECK)).color(GREEN),
+            (Some(_), None) => RichText::new(trf!("{}  найдена", "{}  found", icon::CHECK)).color(GREEN),
         };
         let badge = |ui: &mut egui::Ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(badge.size(12.0)));
@@ -62,13 +62,13 @@ impl App {
             let shown = self.dota.as_ref().map(|d| d.game_dir.parent().unwrap_or(&d.game_dir).to_path_buf());
             ui.horizontal(|ui| {
                 path_cell(ui, shown.as_deref(), 120.0);
-                let label = if shown.is_some() { "Изменить" } else { "Указать папку" };
+                let label = if shown.is_some() { tr!("Изменить", "Change") } else { tr!("Указать папку", "Choose folder") };
                 if ui.add(theme::tool(label)).clicked() {
                     self.pick_dota_dir();
                 }
             });
             if shown.is_none() {
-                ui.label(theme::small("Программа сама ищет Доту в библиотеках Steam. Не нашла — укажи папку «dota 2 beta». Можно и пропустить: записывать получится, а установить в игру — нет."));
+                ui.label(theme::small(tr!("Программа сама ищет Доту в библиотеках Steam. Не нашла — укажи папку «dota 2 beta». Можно и пропустить: записывать получится, а установить в игру — нет.", "The app looks for Dota in your Steam libraries. If it isn't found, choose the “dota 2 beta” folder. You can also skip this: recording works, installing into the game doesn't.")));
             }
             if let Some(Err(e)) = &self.settings.result {
                 ui.label(RichText::new(e.as_str()).size(12.0).color(RED));
@@ -77,9 +77,9 @@ impl App {
     }
 
     fn setup_voice(&mut self, ui: &mut egui::Ui) {
-        step(ui, 2, "Какую озвучку переделываем", |_| {}, |ui| {
+        step(ui, 2, tr!("Какую озвучку переделываем", "Which voice-over to remake"), |_| {}, |ui| {
             let Some(dota) = self.dota.clone() else {
-                ui.label(theme::small("Выберется, когда найдётся Дота."));
+                ui.label(theme::small(tr!("Выберется, когда найдётся Дота.", "Available once Dota is found.")));
                 return;
             };
             if let Some(lang) = self.voice_language_chips(ui, &dota) {
@@ -87,32 +87,31 @@ impl App {
                 self.dota = super::find_dota(&self.config);
             }
             let game_lang = game::language_name(dota.audio_language.as_deref());
-            ui.label(theme::small(format!("Сейчас в игре включена {game_lang}. Видны только языки, скачанные в Steam.")));
+            ui.label(theme::small(trf!("Сейчас в игре включена {game_lang}. Видны только языки, скачанные в Steam.", "The game currently uses {game_lang}. Only languages downloaded in Steam are shown.")));
         });
     }
 
     fn setup_library(&mut self, ui: &mut egui::Ui) {
-        step(ui, 3, "Где хранить фразы", |_| {}, |ui| {
+        step(ui, 3, tr!("Где хранить фразы", "Where to keep your lines"), |_| {}, |ui| {
             let path = self.config.library_dir();
             ui.horizontal(|ui| {
                 path_cell(ui, Some(&path), 120.0);
-                if ui.add(theme::tool("Изменить")).clicked()
-                    && let Some(dir) = rfd::FileDialog::new().set_title("Рабочая папка").pick_folder()
+                if ui.add(theme::tool(tr!("Изменить", "Change"))).clicked()
+                    && let Some(dir) = rfd::FileDialog::new().set_title(tr!("Рабочая папка", "Workspace folder")).pick_folder()
                 {
                     self.config.library = Some(dir);
                 }
             });
-            ui.label(theme::small("Здесь будут твои записи и собранный пак. Каждую папку можно потом поменять отдельно."));
+            ui.label(theme::small(tr!("Здесь будут твои записи и собранный пак. Каждую папку можно потом поменять отдельно.", "Your recordings and the built pack go here. Each folder can be changed separately later.")));
         });
     }
 
     fn setup_footer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(theme::small("Язык интерфейса"));
-            choice_chip(ui, self.config.ui_language == UiLanguage::Russian, true, "Русский");
-            choice_chip(ui, false, false, "English").on_disabled_hover_text("Английский интерфейс — в следующем обновлении");
+            ui.label(theme::small(tr!("Язык интерфейса", "Interface language")));
+            self.ui_language_chips(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(theme::primary(format!("Начать  {}", icon::ARROW_RIGHT)).min_size(vec2(120.0, 34.0))).clicked() {
+                if ui.add(theme::primary(trf!("Начать  {}", "Start  {}", icon::ARROW_RIGHT)).min_size(vec2(120.0, 34.0))).clicked() {
                     self.finish_setup();
                 }
             });
@@ -122,13 +121,13 @@ impl App {
     fn finish_setup(&mut self) {
         let library = self.config.library_dir();
         if let Err(e) = std::fs::create_dir_all(&library) {
-            self.settings.result = Some(Err(format!("Не создаётся {}: {e}", library.display())));
+            self.settings.result = Some(Err(trf!("Не создаётся {}: {e}", "Can't create {}: {e}", library.display())));
             return;
         }
         self.config.setup_done = true;
         self.config.save();
         self.settings.result = None;
-        self.info(format!("Готово. Фразы будут храниться в {}", self.config.export_root().display()));
+        self.info(trf!("Готово. Фразы будут храниться в {}", "Done. Your lines will be kept in {}", self.config.export_root().display()));
     }
 }
 

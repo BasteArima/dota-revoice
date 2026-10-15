@@ -7,9 +7,10 @@ use anyhow::{Context, Result, anyhow};
 use mp3lame_encoder::{Bitrate, Builder, FlushNoGap, MonoPcm, Quality};
 
 use crate::audio::RATE;
+use crate::{tr, trf};
 
 pub fn encode_mp3(samples: &[f32]) -> Result<Vec<u8>> {
-    let mut b = Builder::new().context("LAME не инициализировался")?;
+    let mut b = Builder::new().context(tr!("LAME не инициализировался", "LAME failed to initialize"))?;
     b.set_num_channels(1).map_err(|e| anyhow!("LAME: {e:?}"))?;
     b.set_sample_rate(RATE).map_err(|e| anyhow!("LAME: {e:?}"))?;
     b.set_brate(Bitrate::Kbps64).map_err(|e| anyhow!("LAME: {e:?}"))?;
@@ -27,7 +28,7 @@ pub fn encode_mp3(samples: &[f32]) -> Result<Vec<u8>> {
 
 pub fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
     let spec = hound::WavSpec { channels: 1, sample_rate: RATE, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
-    let mut w = hound::WavWriter::create(path, spec).with_context(|| format!("не создаётся {}", path.display()))?;
+    let mut w = hound::WavWriter::create(path, spec).with_context(|| trf!("не создаётся {}", "can't create {}", path.display()))?;
     for &s in samples {
         w.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
     }
@@ -40,7 +41,7 @@ pub fn write_mp3(path: &Path, samples: &[f32]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, encode_mp3(samples)?).with_context(|| format!("не записался {}", path.display()))
+    std::fs::write(path, encode_mp3(samples)?).with_context(|| trf!("не записался {}", "couldn't write {}", path.display()))
 }
 
 /// Исходник без потерь, с созданием папок.

@@ -15,6 +15,7 @@
 //! Блок фонем (движение губ) не пишем: у звуков способностей его тоже нет.
 
 use crate::mp3::Mp3Stream;
+use crate::tr;
 
 const HEADER_VERSION: u16 = 12;
 const RESOURCE_VERSION: u16 = 1;
@@ -163,9 +164,9 @@ pub fn build(resource_path: &str, mp3: &Mp3Stream) -> Vec<u8> {
 pub fn mp3_of(vsnd_c: &[u8]) -> anyhow::Result<&[u8]> {
     let header = vsnd_c.get(..4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
     let stream = header.and_then(|h| vsnd_c.get(h..)).filter(|s| !s.is_empty());
-    let Some(stream) = stream else { anyhow::bail!("в звуке нет аудиопотока") };
+    let Some(stream) = stream else { anyhow::bail!(tr!("в звуке нет аудиопотока", "the sound has no audio stream")) };
     let mp3 = stream.starts_with(b"ID3") || (stream.len() > 1 && stream[0] == 0xFF && stream[1] & 0xE0 == 0xE0);
-    anyhow::ensure!(mp3, "звук не в mp3");
+    anyhow::ensure!(mp3, tr!("звук не в mp3", "the sound isn't mp3"));
     Ok(stream)
 }
 

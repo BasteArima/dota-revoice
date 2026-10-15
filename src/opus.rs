@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail, ensure};
 use opus_decoder::OpusDecoder;
 
 use crate::audio::{RATE, resample};
+use crate::{tr, trf};
 
 /// Opus всегда декодируется на 48 кГц.
 const OPUS_RATE: u32 = 48000;
@@ -26,25 +27,25 @@ pub fn is_ogg_opus(path: &Path) -> bool {
 /// Читает Ogg Opus в моно 44100 Гц.
 /// Декодер молодой — если он запаникует на странном файле, это станет ошибкой, а не падением.
 pub fn decode_file(path: &Path) -> Result<Vec<f32>> {
-    std::panic::catch_unwind(|| decode(path)).unwrap_or_else(|_| bail!("не удалось декодировать Opus в {}", path.display()))
+    std::panic::catch_unwind(|| decode(path)).unwrap_or_else(|_| bail!(trf!("не удалось декодировать Opus в {}", "couldn't decode Opus in {}", path.display())))
 }
 
 fn decode(path: &Path) -> Result<Vec<f32>> {
-    let file = File::open(path).with_context(|| format!("не открывается {}", path.display()))?;
+    let file = File::open(path).with_context(|| trf!("не открывается {}", "can't open {}", path.display()))?;
     let mut reader = ogg::PacketReader::new(BufReader::new(file));
 
-    let head = reader.read_packet()?.context("пустой файл")?.data;
-    ensure!(head.len() >= 19 && head.starts_with(b"OpusHead"), "это не Ogg Opus");
+    let head = reader.read_packet()?.context(tr!("пустой файл", "empty file"))?.data;
+    ensure!(head.len() >= 19 && head.starts_with(b"OpusHead"), tr!("это не Ogg Opus", "not Ogg Opus"));
     let channels = head[9] as usize;
     let pre_skip = u16::from_le_bytes([head[10], head[11]]) as usize;
     let gain_db = i16::from_le_bytes([head[16], head[17]]) as f32 / 256.0;
     let mapping = head[18];
     if mapping != 0 || !(1..=2).contains(&channels) {
-        bail!("многоканальный Opus ({channels} кан.) не поддерживается");
+        bail!(trf!("многоканальный Opus ({channels} кан.) не поддерживается", "multichannel Opus ({channels} ch) isn't supported"));
     }
 
     // Второй пакет — OpusTags (метаданные), он не нужен.
-    reader.read_packet()?.context("обрезанный файл: нет OpusTags")?;
+    reader.read_packet()?.context(tr!("обрезанный файл: нет OpusTags", "truncated file: no OpusTags"))?;
 
     let mut decoder = OpusDecoder::new(OPUS_RATE, channels).map_err(|e| anyhow::anyhow!("Opus: {e:?}"))?;
     let mut pcm = vec![0f32; MAX_FRAME * channels];

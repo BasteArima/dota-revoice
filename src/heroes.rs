@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::vpk::VpkReader;
 use crate::vsnd;
+use crate::trf;
 
 /// Меняется, когда меняется содержимое кеша — тогда список пересобирается.
 const CACHE_VERSION: u32 = 4;
@@ -57,9 +58,9 @@ pub fn load_or_scan(main_pak: &Path, voice_pak: &Path, name_lang: &str, cache_di
         return Ok(c.heroes);
     }
     let heroes = scan(main_pak, voice_pak, name_lang, cache_dir)?;
-    std::fs::create_dir_all(cache_dir).with_context(|| format!("не создаётся {}", cache_dir.display()))?;
+    std::fs::create_dir_all(cache_dir).with_context(|| trf!("не создаётся {}", "can't create {}", cache_dir.display()))?;
     let json = serde_json::to_vec_pretty(&Catalog { stamp, heroes: heroes.clone() })?;
-    std::fs::write(&cache, json).with_context(|| format!("не записывается {}", cache.display()))?;
+    std::fs::write(&cache, json).with_context(|| trf!("не записывается {}", "can't write {}", cache.display()))?;
     Ok(heroes)
 }
 
@@ -80,7 +81,7 @@ fn scan(main_pak: &Path, voice_pak: &Path, name_lang: &str, cache_dir: &Path) ->
         }
         heroes.push(Hero { id: id.to_owned(), vo, name: String::new(), lines: 0, english_only: false });
     }
-    ensure!(!heroes.is_empty(), "в {} не нашлось героев — формат игры поменялся?", main_pak.display());
+    ensure!(!heroes.is_empty(), trf!("в {} не нашлось героев — формат игры поменялся?", "no heroes found in {} — did the game format change?", main_pak.display()));
 
     let names = [name_lang, "english"].map(|lang| {
         main.read(&format!("resource/localization/abilities_{lang}.txt"))
@@ -88,7 +89,7 @@ fn scan(main_pak: &Path, voice_pak: &Path, name_lang: &str, cache_dir: &Path) ->
             .unwrap_or_default()
     });
     let portraits = cache_dir.join("portraits");
-    std::fs::create_dir_all(&portraits).with_context(|| format!("не создаётся {}", portraits.display()))?;
+    std::fs::create_dir_all(&portraits).with_context(|| trf!("не создаётся {}", "can't create {}", portraits.display()))?;
     for h in &mut heroes {
         h.name = names.iter().find_map(|n| n.get(&h.id).cloned()).unwrap_or_else(|| title_case(&h.id));
         let image = format!("panorama/images/heroes/selection/npc_dota_hero_{}_png.vtex_c", h.id);
@@ -148,7 +149,7 @@ pub fn extract_lines(voice_pak: &Path, vo: &str, out_dir: &Path) -> Result<usize
         return Ok(existing);
     }
     let pak = VpkReader::open(voice_pak)?;
-    std::fs::create_dir_all(out_dir).with_context(|| format!("не создаётся {}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).with_context(|| trf!("не создаётся {}", "can't create {}", out_dir.display()))?;
     let mut n = 0;
     for path in pak.entries().keys() {
         let Some((folder, name)) = vo_entry(path) else { continue };
@@ -159,11 +160,11 @@ pub fn extract_lines(voice_pak: &Path, vo: &str, out_dir: &Path) -> Result<usize
         // Редкие звуки не в mp3 пропускаем — записать поверх них всё равно можно будет позже.
         if let Ok(mp3) = vsnd::mp3_of(&data) {
             let file = out_dir.join(format!("{name}.mp3"));
-            std::fs::write(&file, mp3).with_context(|| format!("не записывается {}", file.display()))?;
+            std::fs::write(&file, mp3).with_context(|| trf!("не записывается {}", "can't write {}", file.display()))?;
             n += 1;
         }
     }
-    ensure!(n > 0, "в {} нет фраз героя ({vo})", voice_pak.display());
+    ensure!(n > 0, trf!("в {} нет фраз героя ({vo})", "no hero lines in {} ({vo})", voice_pak.display()));
     std::fs::write(&marker, stamp)?;
     Ok(n)
 }

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use md5::{Digest, Md5};
+use crate::{tr, trf};
 
 const SIGNATURE: u32 = 0x55AA_1234;
 const VERSION: u32 = 2;
@@ -31,17 +32,17 @@ impl VpkBuilder {
     /// `path` — путь внутри игры с расширением, например
     /// `sounds/vo/bounty_hunter/bount_kill_01.vsnd_c`.
     pub fn add(&mut self, path: &str, data: Vec<u8>) -> Result<()> {
-        ensure!(path.is_ascii(), "путь должен быть в ASCII: {path}");
+        ensure!(path.is_ascii(), trf!("путь должен быть в ASCII: {path}", "the path must be ASCII: {path}"));
         let path = path.replace('\\', "/").to_ascii_lowercase();
         let Some((dir, file)) = path.rsplit_once('/') else {
-            bail!("у файла нет каталога: {path}");
+            bail!(trf!("у файла нет каталога: {path}", "file has no directory: {path}"));
         };
         let Some((name, ext)) = file.rsplit_once('.') else {
-            bail!("у файла нет расширения: {path}");
+            bail!(trf!("у файла нет расширения: {path}", "file has no extension: {path}"));
         };
-        ensure!(!dir.is_empty() && !name.is_empty() && !ext.is_empty(), "кривой путь: {path}");
+        ensure!(!dir.is_empty() && !name.is_empty() && !ext.is_empty(), trf!("кривой путь: {path}", "bad path: {path}"));
         let files = self.tree.entry(ext.into()).or_default().entry(dir.into()).or_default();
-        ensure!(files.insert(name.into(), data).is_none(), "файл добавлен дважды: {path}");
+        ensure!(files.insert(name.into(), data).is_none(), trf!("файл добавлен дважды: {path}", "file added twice: {path}"));
         Ok(())
     }
 
@@ -83,7 +84,7 @@ impl VpkBuilder {
         }
         tree.push(0);
         if data_len > u32::MAX as usize {
-            return Err(io::Error::other("пак больше 4 ГБ не поместится в один файл"));
+            return Err(io::Error::other(tr!("пак больше 4 ГБ не поместится в один файл", "a pack over 4 GB won't fit into one file")));
         }
 
         // MD5 «всего файла» считаем на лету по мере записи.
@@ -148,16 +149,16 @@ pub struct VpkReader {
 impl VpkReader {
     pub fn open(dir_path: impl AsRef<Path>) -> Result<Self> {
         let dir_path = dir_path.as_ref().to_path_buf();
-        let mut f = File::open(&dir_path).with_context(|| format!("не открывается {}", dir_path.display()))?;
+        let mut f = File::open(&dir_path).with_context(|| trf!("не открывается {}", "can't open {}", dir_path.display()))?;
         let mut header = [0u8; HEADER_SIZE];
         f.read_exact(&mut header)?;
         let field = |i: usize| u32::from_le_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
-        ensure!(field(0) == SIGNATURE, "это не VPK: {}", dir_path.display());
-        ensure!(field(1) == VERSION, "поддерживается только VPK v2, а тут v{}", field(1));
+        ensure!(field(0) == SIGNATURE, trf!("это не VPK: {}", "not a VPK: {}", dir_path.display()));
+        ensure!(field(1) == VERSION, trf!("поддерживается только VPK v2, а тут v{}", "only VPK v2 is supported, this is v{}", field(1)));
         let mut tree = vec![0u8; field(2) as usize];
         f.read_exact(&mut tree)?;
 
-        let entries = parse_tree(&tree).with_context(|| format!("битое дерево в {}", dir_path.display()))?;
+        let entries = parse_tree(&tree).with_context(|| trf!("битое дерево в {}", "broken tree in {}", dir_path.display()))?;
         Ok(Self {
             dir_path,
             data_start: (HEADER_SIZE + tree.len()) as u64,
@@ -176,7 +177,7 @@ impl VpkReader {
 
     /// Содержимое файла целиком, с проверкой CRC.
     pub fn read(&self, path: &str) -> Result<Vec<u8>> {
-        let e = self.entries.get(path).with_context(|| format!("в паке нет {path}"))?;
+        let e = self.entries.get(path).with_context(|| trf!("в паке нет {path}", "{path} isn't in the pack"))?;
         let mut out = Vec::with_capacity(e.preload.len() + e.len as usize);
         out.extend_from_slice(&e.preload);
         if e.len > 0 {
@@ -185,7 +186,7 @@ impl VpkReader {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => {
                     let p = self.archive_path(e.archive)?;
-                    v.insert(File::open(&p).with_context(|| format!("нет архива {}", p.display()))?)
+                    v.insert(File::open(&p).with_context(|| trf!("нет архива {}", "archive {} is missing", p.display()))?)
                 }
             };
             let base = if e.archive == EMBEDDED_ARCHIVE { self.data_start } else { 0 };
@@ -194,7 +195,7 @@ impl VpkReader {
             out.resize(start + e.len as usize, 0);
             file.read_exact(&mut out[start..])?;
         }
-        ensure!(crc32fast::hash(&out) == e.crc, "CRC не сходится у {path}");
+        ensure!(crc32fast::hash(&out) == e.crc, trf!("CRC не сходится у {path}", "CRC mismatch for {path}"));
         Ok(out)
     }
 
@@ -209,7 +210,7 @@ impl VpkReader {
             .strip_suffix(".off")
             .unwrap_or(name)
             .strip_suffix("_dir.vpk")
-            .with_context(|| format!("имя не оканчивается на _dir.vpk: {name}"))?;
+            .with_context(|| trf!("имя не оканчивается на _dir.vpk: {name}", "the name doesn't end with _dir.vpk: {name}"))?;
         Ok(self.dir_path.with_file_name(format!("{stem}_{index:03}.vpk")))
     }
 }
@@ -217,7 +218,7 @@ impl VpkReader {
 fn parse_tree(tree: &[u8]) -> Result<BTreeMap<String, VpkEntry>> {
     let mut pos = 0usize;
     let cstr = |pos: &mut usize| -> Result<String> {
-        let end = tree[*pos..].iter().position(|&b| b == 0).context("строка без нуля в конце")? + *pos;
+        let end = tree[*pos..].iter().position(|&b| b == 0).context(tr!("строка без нуля в конце", "string without a trailing zero"))? + *pos;
         let s = std::str::from_utf8(&tree[*pos..end])?.to_owned();
         *pos = end + 1;
         Ok(s)
@@ -238,13 +239,13 @@ fn parse_tree(tree: &[u8]) -> Result<BTreeMap<String, VpkEntry>> {
                 if name.is_empty() {
                     break;
                 }
-                let raw = tree.get(pos..pos + 18).context("обрезанная запись")?;
+                let raw = tree.get(pos..pos + 18).context(tr!("обрезанная запись", "truncated entry"))?;
                 let u16_at = |i: usize| u16::from_le_bytes([raw[i], raw[i + 1]]);
                 let u32_at = |i: usize| u32::from_le_bytes(raw[i..i + 4].try_into().unwrap());
-                ensure!(u16_at(16) == ENTRY_TERMINATOR, "нет терминатора у {dir}/{name}.{ext}");
+                ensure!(u16_at(16) == ENTRY_TERMINATOR, trf!("нет терминатора у {dir}/{name}.{ext}", "no terminator for {dir}/{name}.{ext}"));
                 let preload_len = u16_at(4) as usize;
                 pos += 18;
-                let preload = tree.get(pos..pos + preload_len).context("обрезанный preload")?.to_vec();
+                let preload = tree.get(pos..pos + preload_len).context(tr!("обрезанный preload", "truncated preload"))?.to_vec();
                 pos += preload_len;
                 // Valve пишет пробел вместо пустого каталога/расширения.
                 let mut path = String::new();

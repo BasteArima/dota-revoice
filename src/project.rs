@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use crate::{tr, trf};
 
 pub const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac"];
 const STATE_FILE: &str = "dota_revoice.json";
@@ -208,7 +209,7 @@ impl Store {
         let id = self.takes(res).first().map_or(1, |t| t.id + 1);
         let meta = TakeMeta { trim: self.trim(res).map(|(a, b)| [a, b]), fx: self.processing(res) };
         std::fs::write(dir.join(format!("{id:03}.json")), serde_json::to_vec_pretty(&meta)?)?;
-        std::fs::rename(&raw, dir.join(format!("{id:03}.wav"))).with_context(|| format!("не перенёсся в дубли {}", raw.display()))?;
+        std::fs::rename(&raw, dir.join(format!("{id:03}.wav"))).with_context(|| trf!("не перенёсся в дубли {}", "couldn't move to takes: {}", raw.display()))?;
         Ok(())
     }
 
@@ -217,14 +218,14 @@ impl Store {
     pub fn restore_take(&mut self, res: &str, id: u32) -> Result<()> {
         let dir = self.takes_dir(res);
         let (wav, json) = (dir.join(format!("{id:03}.wav")), dir.join(format!("{id:03}.json")));
-        ensure!(wav.is_file(), "нет дубля №{id}");
+        ensure!(wav.is_file(), trf!("нет дубля №{id}", "no take #{id}"));
         let meta: TakeMeta = std::fs::read(&json).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         self.archive_current(res)?;
         let raw = self.raw(res);
         if let Some(parent) = raw.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(&wav, &raw).with_context(|| format!("не вернулся дубль {}", wav.display()))?;
+        std::fs::rename(&wav, &raw).with_context(|| trf!("не вернулся дубль {}", "couldn't restore take {}", wav.display()))?;
         let _ = std::fs::remove_file(json);
         self.set_trim(res, meta.trim.map(|[a, b]| (a, b)))?;
         self.set_processing(res, meta.fx)
@@ -252,7 +253,7 @@ impl Store {
             if src.is_file() {
                 let name = src.file_name().and_then(|n| n.to_str()).unwrap_or_default();
                 std::fs::rename(&src, trash.join(format!("{}_{name}", stamp())))
-                    .with_context(|| format!("не перенёсся в корзину {}", src.display()))?;
+                    .with_context(|| trf!("не перенёсся в корзину {}", "couldn't move to trash: {}", src.display()))?;
             }
         }
         self.set_trim(res, None)?;
@@ -286,11 +287,11 @@ impl Project {
     pub fn open_in(source_dir: &Path, export_root: &Path) -> Result<Self> {
         let source_dir = source_dir.to_path_buf();
         let mut files: Vec<PathBuf> = std::fs::read_dir(&source_dir)
-            .with_context(|| format!("не открывается папка {}", source_dir.display()))?
+            .with_context(|| trf!("не открывается папка {}", "can't open folder {}", source_dir.display()))?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.is_file() && has_audio_ext(p))
             .collect();
-        ensure!(!files.is_empty(), "в папке {} нет звуков (mp3, wav, ogg…)", source_dir.display());
+        ensure!(!files.is_empty(), trf!("в папке {} нет звуков (mp3, wav, ogg…)", "no sounds in folder {} (mp3, wav, ogg…)", source_dir.display()));
         files.sort();
 
         let (resource_dir, _) = locate(&source_dir);
@@ -490,49 +491,49 @@ fn category(name: &str, prefix: &str) -> String {
 /// Человеческое название категории.
 pub fn category_label(category: &str) -> String {
     if let Some((tags, base)) = category.rsplit_once('/') {
-        let tags: Vec<&str> = tags.split('/').map(|t| if t == "auto" { "Вторая версия" } else { t }).collect();
+        let tags: Vec<&str> = tags.split('/').map(|t| if t == "auto" { tr!("Вторая версия", "Second version") } else { t }).collect();
         return format!("{} · {}", tags.join(" · "), category_label(base));
     }
     if let Some(ability) = category.strip_prefix("ability_") {
-        return format!("Способность: {ability}");
+        return trf!("Способность: {ability}", "Ability: {ability}");
     }
     let label = match category {
-        "attack" => "Атака",
-        "kill" => "Убийства",
-        "move" => "Движение",
-        "death" => "Смерть",
-        "respawn" => "Возрождение",
-        "spawn" => "Появление",
-        "laugh" => "Смех",
-        "deny" => "Добивание своих",
-        "lasthit" => "Последний удар",
-        "level" => "Новый уровень",
-        "pain" => "Боль",
-        "ally" => "Союзники",
-        "item" => "Предметы",
-        "purch" => "Покупка",
-        "rival" => "Соперники",
-        "win" => "Победа",
-        "lose" => "Поражение",
-        "cast" => "Применение",
-        "notyet" => "Перезарядка",
-        "nomana" => "Нет маны",
-        "thanks" => "Благодарность",
-        "anger" => "Злость",
-        "happy" => "Радость",
-        "haste" => "Руна ускорения",
-        "regen" => "Руна регенерации",
-        "invis" => "Руна невидимости",
-        "illus" => "Руна иллюзий",
-        "doubdam" => "Руна двойного урона",
+        "attack" => tr!("Атака", "Attack"),
+        "kill" => tr!("Убийства", "Kills"),
+        "move" => tr!("Движение", "Movement"),
+        "death" => tr!("Смерть", "Death"),
+        "respawn" => tr!("Возрождение", "Respawn"),
+        "spawn" => tr!("Появление", "Spawn"),
+        "laugh" => tr!("Смех", "Laugh"),
+        "deny" => tr!("Добивание своих", "Deny"),
+        "lasthit" => tr!("Последний удар", "Last hit"),
+        "level" => tr!("Новый уровень", "Level up"),
+        "pain" => tr!("Боль", "Pain"),
+        "ally" => tr!("Союзники", "Allies"),
+        "item" => tr!("Предметы", "Items"),
+        "purch" => tr!("Покупка", "Purchase"),
+        "rival" => tr!("Соперники", "Rivals"),
+        "win" => tr!("Победа", "Victory"),
+        "lose" => tr!("Поражение", "Defeat"),
+        "cast" => tr!("Применение", "Cast"),
+        "notyet" => tr!("Перезарядка", "Cooldown"),
+        "nomana" => tr!("Нет маны", "No mana"),
+        "thanks" => tr!("Благодарность", "Thanks"),
+        "anger" => tr!("Злость", "Anger"),
+        "happy" => tr!("Радость", "Joy"),
+        "haste" => tr!("Руна ускорения", "Haste rune"),
+        "regen" => tr!("Руна регенерации", "Regeneration rune"),
+        "invis" => tr!("Руна невидимости", "Invisibility rune"),
+        "illus" => tr!("Руна иллюзий", "Illusion rune"),
+        "doubdam" => tr!("Руна двойного урона", "Double damage rune"),
         "bottle" => "Bottle",
         "blink" => "Blink Dagger",
         "scepter" => "Aghanim's Scepter",
         "immort" => "Aegis",
-        "fastres" => "Быстрое возрождение",
-        "firstblood" => "Первая кровь",
-        "battlebegins" => "Начало битвы",
-        "underattack" => "Под атакой",
+        "fastres" => tr!("Быстрое возрождение", "Fast respawn"),
+        "firstblood" => tr!("Первая кровь", "First blood"),
+        "battlebegins" => tr!("Начало битвы", "Battle begins"),
+        "underattack" => tr!("Под атакой", "Under attack"),
         _ => return category.to_owned(),
     };
     label.to_owned()

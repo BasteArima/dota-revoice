@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
+use dota_revoice::i18n;
 use serde::{Deserialize, Serialize};
+use dota_revoice::tr;
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -53,9 +55,9 @@ pub enum PreRoll {
 impl PreRoll {
     pub fn label(self) -> &'static str {
         match self {
-            PreRoll::Off => "сразу",
-            PreRoll::Countdown => "после отсчёта 3-2-1",
-            PreRoll::Original => "после прослушивания оригинала",
+            PreRoll::Off => tr!("сразу", "right away"),
+            PreRoll::Countdown => tr!("после отсчёта 3-2-1", "after a 3-2-1 countdown"),
+            PreRoll::Original => tr!("после прослушивания оригинала", "after playing the original"),
         }
     }
 }
@@ -92,11 +94,23 @@ fn path() -> Option<PathBuf> {
 }
 
 impl Config {
+    /// Без файла настроек (первый запуск) язык интерфейса — как в системе.
     pub fn load() -> Self {
-        path()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        let saved = path().and_then(|p| std::fs::read(p).ok());
+        let config = match saved {
+            Some(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            None => Self {
+                ui_language: if i18n::system_prefers_russian() { UiLanguage::Russian } else { UiLanguage::English },
+                ..Self::default()
+            },
+        };
+        config.apply_language();
+        config
+    }
+
+    /// Переключает тексты программы на язык из настроек.
+    pub fn apply_language(&self) {
+        i18n::set_english(self.ui_language == UiLanguage::English);
     }
 
     pub fn save(&self) {

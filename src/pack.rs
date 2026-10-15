@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::vpk::{VpkBuilder, VpkReader};
 use crate::{mp3, vsnd};
+use crate::trf;
 
 pub struct Summary {
     pub replaced: usize,
@@ -55,8 +56,8 @@ pub fn build(
     let mut vpk = VpkBuilder::default();
     let mut compiled = BTreeMap::new();
     for (resource, file) in replacements {
-        let bytes = std::fs::read(file).with_context(|| format!("не читается {}", file.display()))?;
-        let stream = mp3::parse(&bytes).with_context(|| format!("не разобрал mp3 {}", file.display()))?;
+        let bytes = std::fs::read(file).with_context(|| trf!("не читается {}", "can't read {}", file.display()))?;
+        let stream = mp3::parse(&bytes).with_context(|| trf!("не разобрал mp3 {}", "couldn't parse mp3 {}", file.display()))?;
         compiled.insert(format!("{resource}.vsnd_c"), vsnd::build(resource, &stream));
     }
 
@@ -85,8 +86,8 @@ pub fn build(
     if let Some(dir) = out_path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let file = File::create(out_path).with_context(|| format!("не создаётся {}", out_path.display()))?;
-    vpk.write_to(BufWriter::new(file)).with_context(|| format!("не записался {}", out_path.display()))?;
+    let file = File::create(out_path).with_context(|| trf!("не создаётся {}", "can't create {}", out_path.display()))?;
+    vpk.write_to(BufWriter::new(file)).with_context(|| trf!("не записался {}", "couldn't write {}", out_path.display()))?;
     progress(1.0);
     Ok(Summary { replaced, not_in_base, copied, size_bytes: std::fs::metadata(out_path)?.len() })
 }

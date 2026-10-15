@@ -13,6 +13,7 @@ use super::settings::choice_chip;
 use super::theme::{self, BG_DEEP, CARD, CARD_HOVER, FAINT, GOLD, GREEN, LINE, MUTED, RED, TEXT, icon};
 use super::{App, Screen};
 use crate::config::UiLanguage;
+use dota_revoice::{tr, trf};
 
 /// Как часто пересчитывать «записано», пока открыт экран.
 const COUNTS_REFRESH: Duration = Duration::from_secs(3);
@@ -123,7 +124,7 @@ impl App {
                         self.screen = Screen::Record;
                     }
                 }
-                Err(e) => self.error(format!("Фразы героя не достались из игры: {e}")),
+                Err(e) => self.error(trf!("Фразы героя не достались из игры: {e}", "Couldn't extract the hero's lines from the game: {e}")),
             }
         }
     }
@@ -168,12 +169,12 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(theme::title("Герои", 22.0));
-                ui.label(theme::small("Выбери героя — его фразы программа достанет из игры сама"));
+                ui.label(theme::title(tr!("Герои", "Heroes"), 22.0));
+                ui.label(theme::small(tr!("Выбери героя — его фразы программа достанет из игры сама", "Pick a hero — the app extracts their lines from the game")));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let custom = theme::ghost(ui, true, format!("{}  Открыть свою папку…", icon::FOLDER_OPEN));
-                if custom.on_hover_text("Папка со звуками, которых нет в списке: дикторы, курьеры, своя выгрузка").clicked() {
+                let custom = theme::ghost(ui, true, trf!("{}  Открыть свою папку…", "{}  Open my own folder…", icon::FOLDER_OPEN));
+                if custom.on_hover_text(tr!("Папка со звуками, которых нет в списке: дикторы, курьеры, своя выгрузка", "A folder with sounds not in the list: announcers, couriers, your own export")).clicked() {
                     self.pick_folder();
                 }
             });
@@ -181,12 +182,12 @@ impl App {
         ui.add_space(10.0);
 
         if self.dota.is_none() {
-            notice(ui, "Дота не найдена — укажи её папку в настройках.", MUTED);
+            notice(ui, tr!("Дота не найдена — укажи её папку в настройках.", "Dota not found — set its folder in the settings."), MUTED);
             return;
         }
         if let Some(e) = self.heroes.error.clone() {
-            notice(ui, &format!("Не получилось прочитать героев из игры: {e}"), RED);
-            if ui.add(theme::tool("Попробовать ещё раз")).clicked() {
+            notice(ui, &trf!("Не получилось прочитать героев из игры: {e}", "Couldn't read heroes from the game: {e}"), RED);
+            if ui.add(theme::tool(tr!("Попробовать ещё раз", "Try again"))).clicked() {
                 self.heroes.source = None;
             }
             return;
@@ -194,7 +195,7 @@ impl App {
         let Some(list) = self.heroes.list.clone() else {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(theme::small("Читаю героев из файлов игры… В первый раз это занимает несколько секунд."));
+                ui.label(theme::small(tr!("Читаю героев из файлов игры… В первый раз это занимает несколько секунд.", "Reading heroes from the game files… The first time takes a few seconds.")));
             });
             return;
         };
@@ -214,7 +215,7 @@ impl App {
             })
             .collect();
         if shown.is_empty() {
-            notice(ui, "Никого не нашлось — поменяй поиск или фильтр.", MUTED);
+            notice(ui, tr!("Никого не нашлось — поменяй поиск или фильтр.", "Nobody found — change the search or the filter."), MUTED);
             return;
         }
 
@@ -250,23 +251,23 @@ impl App {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.heroes.search)
                             .frame(false)
-                            .hint_text(RichText::new("Имя героя").color(FAINT))
+                            .hint_text(RichText::new(tr!("Имя героя", "Hero name")).color(FAINT))
                             .desired_width(200.0),
                     );
                 });
             });
             ui.add_space(6.0);
             for (filter, label) in [
-                (Filter::All, format!("Все {}", list.len())),
-                (Filter::Started, format!("Начатые {started}")),
-                (Filter::Untouched, "Без записей".to_owned()),
+                (Filter::All, trf!("Все {}", "All {}", list.len())),
+                (Filter::Started, trf!("Начатые {started}", "Started {started}")),
+                (Filter::Untouched, tr!("Без записей", "Untouched").to_owned()),
             ] {
                 if choice_chip(ui, self.heroes.filter == filter, true, &label).clicked() {
                     self.heroes.filter = filter;
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(theme::small(format!("Записано всего: {total_done}")));
+                ui.label(theme::small(trf!("Записано всего: {total_done}", "Recorded in total: {total_done}")));
             });
         });
     }
@@ -302,7 +303,7 @@ impl App {
         }
         if opening {
             p.rect_filled(img, top, Color32::from_black_alpha(170));
-            p.text(img.center(), Align2::CENTER_CENTER, "достаю фразы…", FontId::proportional(12.0), GOLD);
+            p.text(img.center(), Align2::CENTER_CENTER, tr!("достаю фразы…", "extracting lines…"), FontId::proportional(12.0), GOLD);
             ui.ctx().request_repaint();
         }
 
@@ -325,9 +326,9 @@ impl App {
             p.rect_stroke(rect, 9.0, Stroke::new(1.5_f32, if hovered { GOLD } else { GOLD.gamma_multiply(0.6) }), egui::StrokeKind::Inside);
         }
         let hint = if hero.english_only {
-            format!("{}: в этой озвучке героя нет, оригинал — английский. Твои фразы заменят его в игре", hero.name)
+            trf!("{}: в этой озвучке героя нет, оригинал — английский. Твои фразы заменят его в игре", "{}: not in this voice-over, the original is English. Your lines will replace it in the game", hero.name)
         } else {
-            format!("{} · папка озвучки {}", hero.name, hero.vo)
+            trf!("{} · папка озвучки {}", "{} · voice folder {}", hero.name, hero.vo)
         };
         let resp = resp.on_hover_text(hint);
         if self.heroes.opening.is_none() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }

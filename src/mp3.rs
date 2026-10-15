@@ -6,6 +6,7 @@
 //! выкидываем, остальное копируем байт в байт.
 
 use anyhow::{Context, Result, bail, ensure};
+use crate::{tr, trf};
 
 #[derive(Debug, Clone)]
 pub struct Mp3Stream {
@@ -113,7 +114,7 @@ pub fn parse(bytes: &[u8]) -> Result<Mp3Stream> {
 
     // Ищем первый кадр, за которым сразу идёт второй, — чтобы не принять мусор за синхрослово.
     let first = loop {
-        ensure!(pos + 4 <= end, "не нашёл ни одного MPEG Layer III кадра");
+        ensure!(pos + 4 <= end, tr!("не нашёл ни одного MPEG Layer III кадра", "no MPEG Layer III frames found"));
         if let Some(h) = parse_header(&bytes[pos..end]) {
             let next = pos + h.frame_len;
             if next == end || bytes.get(next..end).and_then(parse_header).is_some() {
@@ -133,11 +134,10 @@ pub fn parse(bytes: &[u8]) -> Result<Mp3Stream> {
         };
         ensure!(
             h.sample_rate == first.sample_rate && h.channels == first.channels,
-            "в файле меняется частота или число каналов (смещение {pos})"
-        );
+            trf!("в файле меняется частота или число каналов (смещение {pos})", "sample rate or channel count changes inside the file (offset {pos})"));
         let frame = bytes
             .get(pos..pos + h.frame_len)
-            .with_context(|| format!("обрезанный последний кадр (смещение {pos})"))?;
+            .with_context(|| trf!("обрезанный последний кадр (смещение {pos})", "truncated last frame (offset {pos})"))?;
         let skip = first_frame && is_info_frame(frame, &h);
         first_frame = false;
         if !skip {
@@ -147,7 +147,7 @@ pub fn parse(bytes: &[u8]) -> Result<Mp3Stream> {
         pos += h.frame_len;
     }
     if frame_count == 0 {
-        bail!("в файле нет аудиокадров");
+        bail!(tr!("в файле нет аудиокадров", "the file has no audio frames"));
     }
 
     Ok(Mp3Stream {

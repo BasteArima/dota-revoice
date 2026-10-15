@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::game::DotaInstall;
+use crate::{tr, trf};
 
 pub const PAK_NAME: &str = "pak02_dir.vpk";
 /// Наш пак, выключенный переключателем: лежит в игре, но не грузится.
@@ -54,9 +55,9 @@ pub struct Plan {
 impl Plan {
     pub fn for_install(dota: &DotaInstall) -> Result<Self> {
         let language_dir = dota.language_dir().context(
-            "у Доты английская озвучка — моды кладутся в папку языка озвучки (например, dota_russian)",
+            tr!("у Доты английская озвучка — моды кладутся в папку языка озвучки (например, dota_russian)", "Dota's voice-over is English — mods go into a voice-over language folder (e.g. dota_russian)"),
         )?;
-        ensure!(language_dir.is_dir(), "нет папки {}", language_dir.display());
+        ensure!(language_dir.is_dir(), trf!("нет папки {}", "no folder {}", language_dir.display()));
         Ok(Self {
             replaces_existing: language_dir.join(PAK_NAME).is_file() || language_dir.join(PAK_OFF).is_file(),
             disables_valve_pak: language_dir.join(VALVE_ON).is_file(),
@@ -65,35 +66,35 @@ impl Plan {
     }
 
     pub fn describe(&self) -> Vec<String> {
-        let mut steps = vec![format!(
-            "{} {PAK_NAME} в {}",
-            if self.replaces_existing { "Заменить" } else { "Положить" },
+        let mut steps = vec![trf!(
+            "{} {PAK_NAME} в {}", "{} {PAK_NAME} into {}",
+            if self.replaces_existing { tr!("Заменить", "Replace") } else { tr!("Положить", "Put") },
             self.language_dir.display()
         )];
         if self.disables_valve_pak {
-            steps.push("Переименовать pak01_dir.vpk в pak01_dir.vpk.off (отключить озвучку Valve)".into());
+            steps.push(tr!("Переименовать pak01_dir.vpk в pak01_dir.vpk.off (отключить озвучку Valve)", "Rename pak01_dir.vpk to pak01_dir.vpk.off (turn off Valve's voice-over)").into());
         }
         steps
     }
 }
 
 pub fn install(plan: &Plan, built_pak: &Path) -> Result<()> {
-    ensure!(!is_dota_running(), "Дота запущена — закрой её, она держит паки открытыми");
-    ensure!(built_pak.is_file(), "сначала собери пак: нет {}", built_pak.display());
+    ensure!(!is_dota_running(), tr!("Дота запущена — закрой её, она держит паки открытыми", "Dota is running — close it, it keeps the packs open"));
+    ensure!(built_pak.is_file(), trf!("сначала собери пак: нет {}", "build the pack first: {} is missing", built_pak.display()));
 
     // Сначала копируем во временный файл рядом, потом подменяем одним переименованием,
     // чтобы при ошибке посреди копирования в игре не остался обрезанный пак.
     let target = plan.language_dir.join(PAK_NAME);
     let tmp = plan.language_dir.join(format!("{PAK_NAME}.tmp"));
-    std::fs::copy(built_pak, &tmp).with_context(|| format!("не скопировался пак в {}", tmp.display()))?;
+    std::fs::copy(built_pak, &tmp).with_context(|| trf!("не скопировался пак в {}", "couldn't copy the pack to {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, &target) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("не заменился {} — файл занят?", target.display()));
+        return Err(e).with_context(|| trf!("не заменился {} — файл занят?", "couldn't replace {} — is the file in use?", target.display()));
     }
     // Выключенная старая версия больше не нужна — установили свежую.
     let old = plan.language_dir.join(PAK_OFF);
     if old.is_file() {
-        std::fs::remove_file(&old).with_context(|| format!("не удаляется старый {}", old.display()))?;
+        std::fs::remove_file(&old).with_context(|| trf!("не удаляется старый {}", "can't delete the old {}", old.display()))?;
     }
 
     if plan.disables_valve_pak {
@@ -109,9 +110,9 @@ fn disable_valve(dir: &Path) -> Result<()> {
         return Ok(());
     }
     if off.exists() {
-        std::fs::remove_file(&off).with_context(|| format!("не удаляется старый {}", off.display()))?;
+        std::fs::remove_file(&off).with_context(|| trf!("не удаляется старый {}", "can't delete the old {}", off.display()))?;
     }
-    std::fs::rename(&on, &off).with_context(|| format!("не переименовался {} — закрой Доту и Source 2 Viewer", on.display()))
+    std::fs::rename(&on, &off).with_context(|| trf!("не переименовался {} — закрой Доту и Source 2 Viewer", "couldn't rename {} — close Dota and Source 2 Viewer", on.display()))
 }
 
 /// `pak01_dir.vpk.off` → обратно. Если Steam уже вернул pak01, `.off` лишний.
@@ -121,11 +122,11 @@ fn enable_valve(dir: &Path, done: &mut Vec<String>) -> Result<()> {
         return Ok(());
     }
     if on.exists() {
-        std::fs::remove_file(&off).with_context(|| format!("не удаляется {}", off.display()))?;
-        done.push("pak01_dir.vpk уже на месте, лишний .off удалён".into());
+        std::fs::remove_file(&off).with_context(|| trf!("не удаляется {}", "can't delete {}", off.display()))?;
+        done.push(tr!("pak01_dir.vpk уже на месте, лишний .off удалён", "pak01_dir.vpk is already in place, the extra .off was deleted").into());
     } else {
-        std::fs::rename(&off, &on).with_context(|| format!("не переименовался {}", off.display()))?;
-        done.push("pak01_dir.vpk включён обратно".into());
+        std::fs::rename(&off, &on).with_context(|| trf!("не переименовался {}", "couldn't rename {}", off.display()))?;
+        done.push(tr!("pak01_dir.vpk включён обратно", "pak01_dir.vpk turned back on").into());
     }
     Ok(())
 }
@@ -133,14 +134,14 @@ fn enable_valve(dir: &Path, done: &mut Vec<String>) -> Result<()> {
 /// Включает или выключает установленный пак переименованием — без копирования.
 /// Возвращает список сделанного.
 pub fn set_enabled(dota: &DotaInstall, enabled: bool) -> Result<Vec<String>> {
-    ensure!(!is_dota_running(), "Дота запущена — закрой её, она держит паки открытыми");
-    let dir = dota.language_dir().context("у Доты нет папки языка озвучки")?;
+    ensure!(!is_dota_running(), tr!("Дота запущена — закрой её, она держит паки открытыми", "Dota is running — close it, it keeps the packs open"));
+    let dir = dota.language_dir().context(tr!("у Доты нет папки языка озвучки", "Dota has no voice-over language folder"))?;
     let (on, off) = (dir.join(PAK_NAME), dir.join(PAK_OFF));
     let mut done = Vec::new();
     if enabled {
-        ensure!(on.is_file() || off.is_file(), "в {} нет нашего пака — установи его", dir.display());
+        ensure!(on.is_file() || off.is_file(), trf!("в {} нет нашего пака — установи его", "our pack isn't in {} — install it", dir.display()));
         if off.is_file() {
-            std::fs::rename(&off, &on).with_context(|| format!("не переименовался {}", off.display()))?;
+            std::fs::rename(&off, &on).with_context(|| trf!("не переименовался {}", "couldn't rename {}", off.display()))?;
             done.push(format!("{PAK_OFF} → {PAK_NAME}"));
         }
         if dir.join(VALVE_ON).is_file() {
@@ -148,12 +149,12 @@ pub fn set_enabled(dota: &DotaInstall, enabled: bool) -> Result<Vec<String>> {
             done.push(format!("{VALVE_ON} → {VALVE_OFF}"));
         }
     } else {
-        ensure!(on.is_file() || off.is_file(), "в {} нет нашего пака", dir.display());
+        ensure!(on.is_file() || off.is_file(), trf!("в {} нет нашего пака", "our pack isn't in {}", dir.display()));
         if on.is_file() {
             if off.exists() {
-                std::fs::remove_file(&off).with_context(|| format!("не удаляется {}", off.display()))?;
+                std::fs::remove_file(&off).with_context(|| trf!("не удаляется {}", "can't delete {}", off.display()))?;
             }
-            std::fs::rename(&on, &off).with_context(|| format!("не переименовался {}", on.display()))?;
+            std::fs::rename(&on, &off).with_context(|| trf!("не переименовался {}", "couldn't rename {}", on.display()))?;
             done.push(format!("{PAK_NAME} → {PAK_OFF}"));
         }
         enable_valve(&dir, &mut done)?;
@@ -164,20 +165,20 @@ pub fn set_enabled(dota: &DotaInstall, enabled: bool) -> Result<Vec<String>> {
 /// Убирает наш пак (включённый или выключенный) и возвращает озвучку Valve.
 /// Возвращает список сделанного.
 pub fn rollback(dota: &DotaInstall) -> Result<Vec<String>> {
-    ensure!(!is_dota_running(), "Дота запущена — закрой её, она держит паки открытыми");
-    let dir = dota.language_dir().context("у Доты нет папки языка озвучки")?;
+    ensure!(!is_dota_running(), tr!("Дота запущена — закрой её, она держит паки открытыми", "Dota is running — close it, it keeps the packs open"));
+    let dir = dota.language_dir().context(tr!("у Доты нет папки языка озвучки", "Dota has no voice-over language folder"))?;
     let mut done = Vec::new();
 
     for name in [PAK_NAME, PAK_OFF] {
         let pak = dir.join(name);
         if pak.is_file() {
-            std::fs::remove_file(&pak).with_context(|| format!("не удаляется {}", pak.display()))?;
-            done.push(format!("Удалён {name}"));
+            std::fs::remove_file(&pak).with_context(|| trf!("не удаляется {}", "can't delete {}", pak.display()))?;
+            done.push(trf!("Удалён {name}", "Deleted {name}"));
         }
     }
     enable_valve(&dir, &mut done)?;
     if done.is_empty() {
-        bail!("в {} нечего откатывать", dir.display());
+        bail!(trf!("в {} нечего откатывать", "nothing to roll back in {}", dir.display()));
     }
     Ok(done)
 }
@@ -229,7 +230,7 @@ pub fn launch_dota() -> Result<()> {
     let status = std::process::Command::new("open").arg(URL).status();
     #[cfg(all(not(windows), not(target_os = "macos")))]
     let status = std::process::Command::new("xdg-open").arg(URL).status();
-    ensure!(status.context("Steam не запустился")?.success(), "Steam не открыл Доту — он установлен?");
+    ensure!(status.context(tr!("Steam не запустился", "Steam didn't start"))?.success(), tr!("Steam не открыл Доту — он установлен?", "Steam didn't open Dota — is it installed?"));
     Ok(())
 }
 

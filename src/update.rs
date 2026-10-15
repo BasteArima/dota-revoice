@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use crate::tr;
 
 pub const REPO: &str = "BasteArima/dota-revoice";
 
@@ -31,9 +32,9 @@ pub fn latest_release() -> Result<Option<Release>> {
     let body = match response {
         Ok(r) => r.into_string()?,
         Err(ureq::Error::Status(404, _)) => return Ok(None),
-        Err(e) => return Err(e).context("GitHub не ответил"),
+        Err(e) => return Err(e).context(tr!("GitHub не ответил", "GitHub didn't respond")),
     };
-    let release: GithubRelease = serde_json::from_str(&body).context("непонятный ответ GitHub")?;
+    let release: GithubRelease = serde_json::from_str(&body).context(tr!("непонятный ответ GitHub", "unexpected response from GitHub"))?;
     Ok(Some(Release { version: release.tag_name.trim_start_matches('v').to_owned(), url: release.html_url }))
 }
 

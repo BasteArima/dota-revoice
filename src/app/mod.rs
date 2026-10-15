@@ -26,6 +26,7 @@ use build::BuildState;
 use heroes::HeroesState;
 use settings::SettingsState;
 use theme::{GOLD, ON_GOLD, PANEL, RED, icon};
+use dota_revoice::{tr, trf};
 
 const MIN_TAKE_SECS: f32 = 0.2;
 /// Как часто перепроверять игру: Steam мог обновить Доту, пока программа открыта.
@@ -159,7 +160,7 @@ impl App {
         };
         match Player::new() {
             Ok(p) => app.player = Some(p),
-            Err(e) => app.error(format!("Звук не выводится: {e:#}")),
+            Err(e) => app.error(trf!("Звук не выводится: {e:#}", "No audio output: {e:#}")),
         }
         app.open_recorder(app.config.input_device.clone());
         if app.config.check_updates {
@@ -202,12 +203,12 @@ impl App {
                 self.config.input_device = name;
                 self.recorder = Some(r);
             }
-            Err(e) => self.error(format!("Микрофон не открылся: {e:#}")),
+            Err(e) => self.error(trf!("Микрофон не открылся: {e:#}", "Couldn't open the microphone: {e:#}")),
         }
     }
 
     fn pick_folder(&mut self) {
-        if let Some(dir) = rfd::FileDialog::new().set_title("Папка с фразами героя").pick_folder() {
+        if let Some(dir) = rfd::FileDialog::new().set_title(tr!("Папка с фразами героя", "Folder with the hero's lines")).pick_folder() {
             self.open_project(&dir);
         }
     }
@@ -224,8 +225,8 @@ impl App {
                 }
                 // Обычные фразы героя — сверху, вторые версии и прочие группы — после них.
                 groups.sort_by_key(|(c, _)| c.contains('/'));
-                self.info(format!(
-                    "Открыт {}: {} фраз, записано {}. Свои фразы сохраняются в {}",
+                self.info(trf!(
+                    "Открыт {}: {} фраз, записано {}. Свои фразы сохраняются в {}", "Opened {}: {} lines, {} recorded. Your lines are saved to {}",
                     self.hero_name(&p.hero),
                     p.lines.len(),
                     p.recorded_count(),
@@ -270,7 +271,7 @@ impl App {
         self.note = self.project.as_ref().map(|p| p.note(&line).to_owned()).unwrap_or_default();
         match audio::decode_file(&line.original) {
             Ok(s) => self.original = Some(Clip::new(s)),
-            Err(e) => self.error(format!("Оригинал не читается: {e:#}")),
+            Err(e) => self.error(trf!("Оригинал не читается: {e:#}", "Can't read the original: {e:#}")),
         }
         self.reload_mine(&line);
     }
@@ -301,7 +302,7 @@ impl App {
                 self.mine_raw = Some(Arc::new(samples));
                 self.render_full();
             }
-            Err(e) => self.error(format!("Моя версия не читается: {e:#}")),
+            Err(e) => self.error(trf!("Моя версия не читается: {e:#}", "Can't read my version: {e:#}")),
         }
     }
 
@@ -367,11 +368,11 @@ impl App {
             return;
         }
         let Some(gain) = self.measure_gain() else {
-            self.error("Не получилось измерить громкость — запись слишком короткая или тихая");
+            self.error(tr!("Не получилось измерить громкость — запись слишком короткая или тихая", "Couldn't measure loudness — the recording is too short or too quiet"));
             return;
         };
         match self.apply_fx(Settings { gain_db: gain, ..self.fx }) {
-            Ok(()) => self.info(format!("Громкость подогнана под оригинал: {gain:+.1} dB")),
+            Ok(()) => self.info(trf!("Громкость подогнана под оригинал: {gain:+.1} dB", "Loudness matched to the original: {gain:+.1} dB")),
             Err(e) => self.error(format!("{e:#}")),
         }
     }
@@ -396,12 +397,12 @@ impl App {
 
     fn toggle_denoise(&mut self) {
         let on = !self.fx.denoise;
-        self.change_fx(|fx| fx.denoise = on, if on { "Шумодав включён" } else { "Шумодав выключен" });
+        self.change_fx(|fx| fx.denoise = on, if on { tr!("Шумодав включён", "Noise reduction on") } else { tr!("Шумодав выключен", "Noise reduction off") });
     }
 
     fn set_pitch(&mut self, semitones: f32) {
         let semitones = semitones.clamp(-12.0, 12.0);
-        let text = if semitones == 0.0 { "Тон как в записи".to_owned() } else { format!("Тон: {semitones:+.0} полутона") };
+        let text = if semitones == 0.0 { tr!("Тон как в записи", "Pitch as recorded").to_owned() } else { trf!("Тон: {semitones:+.0} полутона", "Pitch: {semitones:+.0} semitones") };
         self.change_fx(|fx| fx.pitch = semitones, &text);
     }
 
@@ -410,7 +411,7 @@ impl App {
         let (Some(line), Some(p)) = (self.current_line(), self.project.as_mut()) else { return };
         let result = p.restore_take(&line, id);
         if let Err(e) = result {
-            self.error(format!("Дубль не вернулся: {e:#}"));
+            self.error(trf!("Дубль не вернулся: {e:#}", "Couldn't restore the take: {e:#}"));
             return;
         }
         self.reload_mine(&line);
@@ -419,7 +420,7 @@ impl App {
             None => Ok(()),
         });
         match saved {
-            Ok(()) => self.info(format!("Дубль №{id} снова в работе, прежняя версия — в дублях")),
+            Ok(()) => self.info(trf!("Дубль №{id} снова в работе, прежняя версия — в дублях", "Take #{id} is current again, the previous version went to takes")),
             Err(e) => self.error(format!("{e:#}")),
         }
     }
@@ -429,7 +430,7 @@ impl App {
         match p.trash_take(&line, id) {
             Ok(()) => {
                 self.takes = p.takes(&line);
-                self.info(format!("Дубль №{id} — в корзине"));
+                self.info(trf!("Дубль №{id} — в корзине", "Take #{id} moved to the trash"));
             }
             Err(e) => self.error(format!("{e:#}")),
         }
@@ -451,20 +452,20 @@ impl App {
         let Some(raw) = &self.mine_full else { return };
         let len = raw.samples.len();
         let Some(range) = audio::detect_voice(&raw.samples) else {
-            self.error("Не нашёл голос в записи — слишком тихо?");
+            self.error(tr!("Не нашёл голос в записи — слишком тихо?", "No voice found in the recording — too quiet?"));
             return;
         };
         match self.apply_trim(range) {
-            Ok(()) if range == (0, len) => self.info("Тишины по краям нет — обрезать нечего"),
-            Ok(()) => self.info(format!("Тишина обрезана: {:.2}–{:.2} с", index_to_secs(range.0), index_to_secs(range.1))),
-            Err(e) => self.error(format!("Обрезка не сохранилась: {e:#}")),
+            Ok(()) if range == (0, len) => self.info(tr!("Тишины по краям нет — обрезать нечего", "No silence at the edges — nothing to trim")),
+            Ok(()) => self.info(trf!("Тишина обрезана: {:.2}–{:.2} с", "Silence trimmed: {:.2}–{:.2} s", index_to_secs(range.0), index_to_secs(range.1))),
+            Err(e) => self.error(trf!("Обрезка не сохранилась: {e:#}", "Trim wasn't saved: {e:#}")),
         }
     }
 
     fn reset_trim(&mut self) {
         let Some(len) = self.mine_raw.as_ref().map(|r| r.len()) else { return };
         match self.apply_trim((0, len)) {
-            Ok(()) => self.info("Обрезка снята — в игру пойдёт запись целиком"),
+            Ok(()) => self.info(tr!("Обрезка снята — в игру пойдёт запись целиком", "Trim removed — the whole recording goes into the game")),
             Err(e) => self.error(format!("{e:#}")),
         }
     }
@@ -472,7 +473,7 @@ impl App {
     fn save_note(&mut self) {
         let (Some(line), Some(p)) = (self.current_line(), self.project.as_mut()) else { return };
         if let Err(e) = p.set_note(&line, &self.note) {
-            self.error(format!("Заметка не сохранилась: {e:#}"));
+            self.error(trf!("Заметка не сохранилась: {e:#}", "Note wasn't saved: {e:#}"));
         }
     }
 
@@ -513,7 +514,7 @@ impl App {
             .find(|&i| p.status(&p.lines[i]) != Status::Recorded);
         match found {
             Some(i) => self.select(i),
-            None => self.info("Все фразы в списке записаны"),
+            None => self.info(tr!("Все фразы в списке записаны", "Every line in the list is recorded")),
         }
     }
 
@@ -548,14 +549,14 @@ impl App {
 
     fn toggle_record(&mut self) {
         let Some(rec) = &self.recorder else {
-            self.error("Микрофон не открыт — выбери его в настройках");
+            self.error(tr!("Микрофон не открыт — выбери его в настройках", "No microphone open — pick one in the settings"));
             return;
         };
         if self.pending.take().is_some() {
             if let Some(p) = &self.player {
                 p.stop();
             }
-            self.info("Запись отменена");
+            self.info(tr!("Запись отменена", "Recording cancelled"));
             return;
         }
         if !rec.is_recording() {
@@ -573,8 +574,8 @@ impl App {
             return;
         }
         match rec.stop() {
-            Ok(samples) => self.store_take(samples, "Записано"),
-            Err(e) => self.error(format!("Запись не сохранилась: {e:#}")),
+            Ok(samples) => self.store_take(samples, tr!("Записано", "Recorded")),
+            Err(e) => self.error(trf!("Запись не сохранилась: {e:#}", "Recording wasn't saved: {e:#}")),
         }
     }
 
@@ -627,22 +628,22 @@ impl App {
 
     fn import_file(&mut self) {
         let Some(file) = rfd::FileDialog::new()
-            .set_title("Выбери файл с фразой")
-            .add_filter("Аудио", &project::AUDIO_EXTENSIONS)
+            .set_title(tr!("Выбери файл с фразой", "Pick a file with the line"))
+            .add_filter(tr!("Аудио", "Audio"), &project::AUDIO_EXTENSIONS)
             .pick_file()
         else {
             return;
         };
         match audio::decode_file(&file) {
-            Ok(samples) => self.store_take(samples, "Импортировано"),
-            Err(e) => self.error(format!("Файл не читается: {e:#}")),
+            Ok(samples) => self.store_take(samples, tr!("Импортировано", "Imported")),
+            Err(e) => self.error(trf!("Файл не читается: {e:#}", "Can't read the file: {e:#}")),
         }
     }
 
     fn store_take(&mut self, samples: Vec<f32>, verb: &str) {
         let secs = samples.len() as f32 / audio::RATE as f32;
         if secs < MIN_TAKE_SECS {
-            self.error("Слишком короткая запись — ничего не сохранено");
+            self.error(tr!("Слишком короткая запись — ничего не сохранено", "Recording too short — nothing saved"));
             return;
         }
         let (Some(line), Some(p)) = (self.current_line(), self.project.as_mut()) else { return };
@@ -650,7 +651,7 @@ impl App {
         let saved = p.archive_current(&line).and_then(|_| encode::save_raw(&p.raw_wav(&line), &samples));
         self.takes = p.takes(&line);
         if let Err(e) = saved {
-            self.error(format!("Не сохранилось: {e:#}"));
+            self.error(trf!("Не сохранилось: {e:#}", "Not saved: {e:#}"));
             return;
         }
         let len = samples.len();
@@ -677,14 +678,14 @@ impl App {
         });
         let mut done = vec![format!("{verb}: {}", mp3.display())];
         if self.trim != (0, len) {
-            done.push(format!("тишина обрезана, {:.1} из {secs:.1} с", index_to_secs(self.trim.1 - self.trim.0)));
+            done.push(trf!("тишина обрезана, {:.1} из {secs:.1} с", "silence trimmed, {:.1} of {secs:.1} s", index_to_secs(self.trim.1 - self.trim.0)));
         }
         if self.fx.gain_db != 0.0 {
-            done.push(format!("громкость {:+.1} dB", self.fx.gain_db));
+            done.push(trf!("громкость {:+.1} dB", "loudness {:+.1} dB", self.fx.gain_db));
         }
         match result {
             Ok(()) => self.info(done.join(" · ")),
-            Err(e) => self.error(format!("Не сохранилось: {e:#}")),
+            Err(e) => self.error(trf!("Не сохранилось: {e:#}", "Not saved: {e:#}")),
         }
     }
 
@@ -709,7 +710,7 @@ impl App {
                 self.mine = None;
                 self.mine_full = None;
                 self.mine_raw = None;
-                self.info(format!("{} перенесена в корзину: {}", line.name, trash_dir.display()));
+                self.info(trf!("{} перенесена в корзину: {}", "{} moved to the trash: {}", line.name, trash_dir.display()));
             }
             Err(e) => self.error(format!("{e:#}")),
         }
@@ -754,13 +755,13 @@ impl App {
         }
         if pressed(Key::Escape) {
             if self.pending.take().is_some() {
-                self.info("Запись отменена");
+                self.info(tr!("Запись отменена", "Recording cancelled"));
             }
             if let Some(r) = &self.recorder
                 && r.is_recording()
             {
                 r.cancel();
-                self.info("Запись отменена");
+                self.info(tr!("Запись отменена", "Recording cancelled"));
             }
             if let Some(p) = &self.player {
                 p.stop();
@@ -780,10 +781,10 @@ impl App {
             if let Some(p) = &self.project {
                 let text = format!("{}  ·  {}/{}", self.hero_name(&p.hero), p.recorded_count(), p.lines.len());
                 let chip = egui::Button::new(RichText::new(text).color(theme::TEXT)).corner_radius(99);
-                if ui.add(chip).on_hover_text("К списку героев").clicked() {
+                if ui.add(chip).on_hover_text(tr!("К списку героев", "Back to the hero list")).clicked() {
                     self.screen = Screen::Heroes;
                 }
-            } else if ui.add(theme::primary(format!("{}  Выбрать героя", icon::USERS_THREE))).clicked() {
+            } else if ui.add(theme::primary(trf!("{}  Выбрать героя", "{}  Pick a hero", icon::USERS_THREE))).clicked() {
                 self.screen = Screen::Heroes;
             }
 
@@ -792,7 +793,7 @@ impl App {
             ui.add_space(gap.max(10.0));
             let tabs = egui::Frame::default().fill(theme::BG).corner_radius(10).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for (screen, label) in [(Screen::Heroes, "Герои"), (Screen::Record, "Запись"), (Screen::Build, "Сборка и установка")] {
+                for (screen, label) in [(Screen::Heroes, tr!("Герои", "Heroes")), (Screen::Record, tr!("Запись", "Record")), (Screen::Build, tr!("Сборка и установка", "Build & install"))] {
                     let on = self.screen == screen;
                     let text = RichText::new(label).color(if on { theme::TEXT } else { theme::MUTED });
                     let btn = egui::Button::new(text).fill(if on { theme::CARD } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::NONE).corner_radius(8);
@@ -813,7 +814,7 @@ impl App {
                     .fill(if on { theme::CARD } else { egui::Color32::TRANSPARENT })
                     .stroke(egui::Stroke::NONE)
                     .corner_radius(8);
-                if ui.add(gear).on_hover_text("Настройки").clicked() {
+                if ui.add(gear).on_hover_text(tr!("Настройки", "Settings")).clicked() {
                     self.screen = match (on, self.project.is_some()) {
                         (false, _) => Screen::Settings,
                         (true, true) => Screen::Record,
@@ -821,7 +822,7 @@ impl App {
                     };
                 }
                 if let Some(d) = &self.dota {
-                    let text = format!("Озвучка: {}", game::language_name(d.voice_language.as_deref()));
+                    let text = trf!("Озвучка: {}", "Voice-over: {}", game::language_name(d.voice_language.as_deref()));
                     ui.label(theme::small(text));
                 }
             });
@@ -845,16 +846,16 @@ impl App {
         let Some(release) = self.update.clone() else { return };
         ui.horizontal(|ui| {
             ui.label(RichText::new(icon::SPARKLE).size(18.0).color(GOLD));
-            ui.label(RichText::new(format!(
-                "Вышла новая версия {} (у тебя {}). Скачай её со страницы релиза и замени старую программу.",
+            ui.label(RichText::new(trf!(
+                "Вышла новая версия {} (у тебя {}). Скачай её со страницы релиза и замени старую программу.", "Version {} is out (you have {}). Download it from the release page and replace the old app.",
                 release.version,
                 env!("CARGO_PKG_VERSION")
             )).color(theme::TEXT));
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                if theme::ghost(ui, true, icon::X).on_hover_text("Скрыть до следующего запуска").clicked() {
+                if theme::ghost(ui, true, icon::X).on_hover_text(tr!("Скрыть до следующего запуска", "Hide until next launch")).clicked() {
                     self.update = None;
                 }
-                if ui.add(theme::primary(format!("{}  Скачать", icon::DOWNLOAD_SIMPLE))).clicked() {
+                if ui.add(theme::primary(trf!("{}  Скачать", "{}  Download", icon::DOWNLOAD_SIMPLE))).clicked() {
                     open_url(&release.url);
                 }
             });
@@ -879,18 +880,17 @@ impl App {
         };
         let (text, action) = match alert {
             install::Alert::ValveRestored => (
-                "Steam вернул озвучку Valve — так бывает после обновления Доты или проверки файлов. Сейчас в игре звучат не твои фразы.".to_owned(),
-                Some(("Переустановить", "Пересобрать и установить пак заново", Screen::Build)),
+                tr!("Steam вернул озвучку Valve — так бывает после обновления Доты или проверки файлов. Сейчас в игре звучат не твои фразы.", "Steam restored Valve's voice-over — this happens after a Dota update or a file check. Your lines aren't playing in the game right now.").to_owned(),
+                Some((tr!("Переустановить", "Reinstall"), tr!("Пересобрать и установить пак заново", "Rebuild and reinstall the pack"), Screen::Build)),
             ),
             install::Alert::EnglishAudio => (
-                "В Доте выбрана английская озвучка — моды из папки языка не загружаются. Переключи язык озвучки игры на русский и перезапусти её.".to_owned(),
+                tr!("В Доте выбрана английская озвучка — моды из папки языка не загружаются. Переключи язык озвучки игры на русский и перезапусти её.", "Dota is set to English voice-over — mods from a language folder don't load. Switch the game's voice-over language (e.g. to Russian) and restart it.").to_owned(),
                 None,
             ),
             install::Alert::OtherAudio => (
-                format!(
-                    "В Доте включена {game_lang} озвучка, а мод собирается для озвучки «{voice_lang}» — в игре его не будет слышно. Переключи язык озвучки игры или выбери другую озвучку в настройках."
-                ),
-                Some(("Настройки", "Выбрать, какую озвучку переделываем", Screen::Settings)),
+                trf!(
+                    "В Доте включена {game_lang} озвучка, а мод собирается для озвучки «{voice_lang}» — в игре его не будет слышно. Переключи язык озвучки игры или выбери другую озвучку в настройках.", "Dota uses {game_lang} voice-over, but the mod is built for {voice_lang} voice-over — you won't hear it in the game. Switch the game's voice-over language or pick another one in the settings."),
+                Some((tr!("Настройки", "Settings"), tr!("Выбрать, какую озвучку переделываем", "Choose which voice-over to remake"), Screen::Settings)),
             ),
         };
         ui.horizontal(|ui| {
@@ -1034,16 +1034,16 @@ fn find_dota(config: &Config) -> Option<DotaInstall> {
 }
 
 fn dota_status(dota: Option<&DotaInstall>) -> String {
-    let Some(d) = dota else { return "Дота не найдена".into() };
+    let Some(d) = dota else { return tr!("Дота не найдена", "Dota not found").into() };
     if d.voice_language.is_none() {
-        return "Озвучка Доты английская — для модов переключи язык озвучки".into();
+        return tr!("Озвучка Доты английская — для модов переключи язык озвучки", "Dota's voice-over is English — switch the voice-over language for mods").into();
     }
     let lang = game::language_name(d.voice_language.as_deref());
     match (d.voice_pak(), install::mod_state(d)) {
-        (None, _) => format!("Дота · озвучка {lang} · пак озвучки не скачан"),
-        (Some(v), install::ModState::Enabled) if !v.enabled => format!("Дота · озвучка {lang} · работает наш пак"),
-        (Some(_), install::ModState::Disabled) => format!("Дота · озвучка {lang} · мод выключен"),
-        (Some(_), _) => format!("Дота · озвучка {lang} · пак Valve включён"),
+        (None, _) => trf!("Дота · озвучка {lang} · пак озвучки не скачан", "Dota · {lang} voice-over · voice pack not downloaded"),
+        (Some(v), install::ModState::Enabled) if !v.enabled => trf!("Дота · озвучка {lang} · работает наш пак", "Dota · {lang} voice-over · our pack is active"),
+        (Some(_), install::ModState::Disabled) => trf!("Дота · озвучка {lang} · мод выключен", "Dota · {lang} voice-over · mod off"),
+        (Some(_), _) => trf!("Дота · озвучка {lang} · пак Valve включён", "Dota · {lang} voice-over · Valve pack on"),
     }
 }
 
