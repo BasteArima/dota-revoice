@@ -31,7 +31,7 @@ jobs:
           Copy-Item target/release/dota_revoice.exe dist/DotaRevoice/DotaRevoice.exe
           Copy-Item README.md, LICENSE dist/DotaRevoice/
           Compress-Archive -Path dist/DotaRevoice -DestinationPath "DotaRevoice-$env:GITHUB_REF_NAME-windows-x64.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: DotaRevoice-*-windows-x64.zip
@@ -62,7 +62,7 @@ jobs:
           # Подпись без сертификата: без неё macOS не запомнит разрешение на микрофон.
           codesign --force --deep --sign - "$app"
           ditto -c -k --keepParent "$app" "DotaRevoice-$GITHUB_REF_NAME-macos.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: DotaRevoice-*-macos.zip
@@ -86,7 +86,7 @@ jobs:
           strip "$dir/dota-revoice"
           cp README.md LICENSE packaging/linux/dota-revoice.desktop "$dir/"
           tar -C dist -czf "DotaRevoice-$GITHUB_REF_NAME-linux-x64.tar.gz" DotaRevoice
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: DotaRevoice-*-linux-x64.tar.gz
@@ -95,7 +95,7 @@ jobs:
     needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - name: Релиз на GitHub
