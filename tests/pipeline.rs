@@ -57,6 +57,10 @@ fn record_trash_and_pack() {
     assert_eq!(p2.trim(&p2.lines[0]), Some((0.1, 1.0)));
     assert_eq!(p2.note(&p2.lines[0]), "убийство героя");
     assert_eq!(p2.note(&p2.lines[1]), "");
+    let mut p2 = p2;
+    let fx = dota_revoice::process::Settings { denoise: true, gain_db: 3.5 };
+    p2.set_processing(&kill, fx).unwrap();
+    assert_eq!(Project::open(&hero).unwrap().processing(&kill), fx);
     assert_eq!(p2.recorded_count(), 1);
 
     // Базовый пак «Valve» с обеими фразами — наша заменяет одну, вторая копируется.

@@ -6,6 +6,7 @@ pub mod game;
 pub mod install;
 pub mod mp3;
 pub mod pack;
+pub mod process;
 pub mod project;
 pub mod vpk;
 pub mod vsnd;

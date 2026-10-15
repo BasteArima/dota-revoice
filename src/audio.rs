@@ -30,12 +30,16 @@ pub struct Clip {
     pub samples: Arc<Vec<f32>>,
     /// (минимум, максимум) по `PEAK_BINS` равным кускам.
     pub peaks: Arc<Vec<(f32, f32)>>,
+    /// Громкость в LUFS, а для совсем коротких клипов — RMS в dBFS.
+    pub loudness: f32,
 }
 
 impl Clip {
     pub fn new(samples: Vec<f32>) -> Self {
         let peaks = compute_peaks(&samples, PEAK_BINS);
-        Self { samples: Arc::new(samples), peaks: Arc::new(peaks) }
+        let mut clip = Self { samples: Arc::new(samples), peaks: Arc::new(peaks), loudness: 0.0 };
+        clip.loudness = crate::process::loudness_lufs(&clip.samples).unwrap_or_else(|| clip.rms_db());
+        clip
     }
 
     pub fn duration_secs(&self) -> f32 {
@@ -197,6 +201,17 @@ pub enum Track {
     Original,
     Mine,
     Compare,
+    /// Служебный сигнал (отсчёт перед записью).
+    Cue,
+}
+
+/// Короткий «бип» для отсчёта: синус с мягкими краями.
+pub fn beep(hz: f32, secs: f32) -> Vec<f32> {
+    let mut s: Vec<f32> = (0..(secs * RATE as f32) as usize)
+        .map(|i| (i as f32 * hz * std::f32::consts::TAU / RATE as f32).sin() * 0.35)
+        .collect();
+    fade_edges(&mut s);
+    s
 }
 
 #[derive(Default)]

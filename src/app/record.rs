@@ -5,9 +5,10 @@ use dota_revoice::project::{self, Status};
 use eframe::egui::{self, Align, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use super::theme::{self, AMBER, BG_DEEP, CARD_HOVER, FAINT, GOLD, GREEN, LINE, MUTED, ON_GOLD, RED, TEXT, WAVE, icon};
-use super::{App, Handle, MIN_TRIM_SAMPLES, TrimDrag, index_to_secs, prefix_of};
+use super::{App, Handle, MIN_TRIM_SAMPLES, Pending, TrimDrag, index_to_secs, prefix_of};
+use crate::config::PreRoll;
 
-const WAVE_HEIGHT: f32 = 84.0;
+const WAVE_HEIGHT: f32 = 72.0;
 
 impl App {
     pub(super) fn line_list(&mut self, ui: &mut egui::Ui) {
@@ -160,7 +161,7 @@ impl App {
         let live = recording.then(|| self.recorder.as_ref().map(|r| r.live_peaks(1024))).flatten();
         let mine_secs = match &live {
             Some((_, secs)) => *secs,
-            None => self.mine_raw.as_ref().map_or(0.0, |c| c.duration_secs()),
+            None => self.mine_full.as_ref().map_or(0.0, |c| c.duration_secs()),
         };
         let timeline = orig_secs.max(mine_secs).max(0.1);
 
@@ -169,7 +170,7 @@ impl App {
                 ui.label(theme::small("Оригинал"));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if let Some(c) = &self.original {
-                        ui.label(theme::small(format!("{:.1} dB", c.rms_db())));
+                        ui.label(theme::small(format!("{:.1} LUFS", c.loudness)));
                     }
                 });
             });
@@ -190,8 +191,17 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if recording {
                         ui.label(RichText::new(format!("●  запись {mine_secs:.1} с")).size(12.0).color(RED));
+                    } else if let Some(pending) = self.pending {
+                        let text = match pending {
+                            Pending::Countdown { started, .. } => {
+                                let left = if started.is_nan() { 3.0 } else { 3.0 - (ui.input(|i| i.time) - started) };
+                                format!("приготовься… {}", left.ceil().max(1.0))
+                            }
+                            Pending::Original { .. } => "слушай оригинал, запись начнётся после него".to_owned(),
+                        };
+                        ui.label(RichText::new(text).size(12.0).color(AMBER));
                     } else if let (Some(m), Some(o)) = (&self.mine, &self.original) {
-                        let diff = m.rms_db() - o.rms_db();
+                        let diff = m.loudness - o.loudness;
                         let (hint, color) = if diff.abs() < 2.0 {
                             ("≈ как оригинал".to_owned(), GREEN)
                         } else if diff < 0.0 {
@@ -200,11 +210,18 @@ impl App {
                             (format!("громче на {diff:.1} dB"), AMBER)
                         };
                         ui.label(RichText::new(hint).size(12.0).color(color));
+                        ui.label(theme::small(format!("{:.1} LUFS ·", m.loudness)));
                         ui.label(theme::small(format!("{:.1} с ·", m.duration_secs())));
-                        if let Some(raw) = &self.mine_raw
-                            && m.samples.len() < raw.samples.len()
+                        if let Some(full) = &self.mine_full
+                            && m.samples.len() < full.samples.len()
                         {
-                            ui.label(theme::small(format!("{} из {:.1} с ·", icon::SCISSORS, raw.duration_secs())));
+                            ui.label(theme::small(format!("{} из {:.1} с ·", icon::SCISSORS, full.duration_secs())));
+                        }
+                        if self.fx.gain_db != 0.0 {
+                            ui.label(theme::small(format!("{:+.1} dB ·", self.fx.gain_db)));
+                        }
+                        if self.fx.denoise {
+                            ui.label(theme::small("шумодав ·"));
                         }
                     }
                 });
@@ -229,8 +246,8 @@ impl App {
 
         // Второстепенные действия — тихие кнопки по центру.
         let can_edit = self.mine_raw.is_some() && !recording;
-        let trimmed = self.mine_raw.as_ref().is_some_and(|r| self.trim != (0, r.samples.len()));
-        centered(ui, 640.0, |ui| {
+        let trimmed = self.mine_raw.is_some() && self.trim != (0, self.full_len());
+        centered(ui, 730.0, |ui| {
             if ui.add_enabled(self.mine.is_some() && self.original.is_some(), theme::ghost(format!("{}  Сравнить", icon::ARROWS_LEFT_RIGHT))).on_hover_text("Оригинал, потом моя (C)").clicked() {
                 self.toggle_play(Track::Compare);
             }
@@ -239,6 +256,14 @@ impl App {
             }
             if ui.add_enabled(can_edit && trimmed, theme::ghost("Без обрезки")).clicked() {
                 self.reset_trim();
+            }
+            if ui.add_enabled(can_edit, theme::ghost(format!("{}  Громкость", icon::SPEAKER_HIGH))).on_hover_text("Подогнать громкость под оригинал (L)").clicked() {
+                self.match_loudness();
+            }
+            let denoise = self.fx.denoise;
+            let denoise_btn = egui::Button::new(RichText::new(format!("{}  Шумодав", icon::WAVEFORM)).color(if denoise { GOLD } else { MUTED })).frame(false);
+            if ui.add_enabled(can_edit, denoise_btn).on_hover_text("Убрать шум комнаты и фон (RNNoise)").clicked() {
+                self.toggle_denoise();
             }
             if ui.add_enabled(!recording, theme::ghost(format!("{}  Из файла", icon::FILE_ARROW_DOWN))).clicked() {
                 self.import_file();
@@ -252,21 +277,29 @@ impl App {
                 self.trash_current();
             }
         });
-        ui.add_space(4.0);
-        centered(ui, 640.0, |ui| {
-            let auto = self.config.auto_trim;
-            let text = format!("{}  Автообрезка тишины после записи", if auto { icon::CHECK_SQUARE } else { icon::SQUARE });
-            if ui.add(egui::Button::new(RichText::new(text).size(12.0).color(if auto { GOLD } else { FAINT })).frame(false)).clicked() {
-                self.config.auto_trim = !auto;
+        ui.add_space(6.0);
+        // Что делать с новой записью — общие настройки, а не для одной фразы.
+        centered(ui, 650.0, |ui| {
+            ui.label(RichText::new("После записи:").size(12.0).color(FAINT));
+            let mut changed = false;
+            changed |= toggle(ui, &mut self.config.auto_trim, "обрезать тишину");
+            changed |= toggle(ui, &mut self.config.auto_level, "подогнать громкость");
+            changed |= toggle(ui, &mut self.config.denoise_new, "шумодав");
+            ui.label(RichText::new("· запись начинается").size(12.0).color(FAINT));
+            egui::ComboBox::from_id_salt("pre_roll").selected_text(RichText::new(self.config.pre_roll.label()).size(12.0)).show_ui(ui, |ui| {
+                for mode in [PreRoll::Off, PreRoll::Countdown, PreRoll::Original] {
+                    changed |= ui.selectable_value(&mut self.config.pre_roll, mode, mode.label()).changed();
+                }
+            });
+            if changed {
                 self.config.save();
-            }
-            if self.mine_raw.is_some() {
-                ui.label(RichText::new("· края волны можно тянуть мышкой").size(12.0).color(FAINT));
             }
         });
 
-        ui.with_layout(egui::Layout::bottom_up(Align::Center), |ui| {
-            ui.label(RichText::new("Space — оригинал · R — запись · M — моя · C — сравнить · T — тишина · ↑↓ — фразы · N — пустая · Esc — отмена").size(11.0).color(FAINT));
+        ui.add_space(10.0);
+        ui.vertical_centered(|ui| {
+            let hints = "Space оригинал · Ctrl+Space моя · R запись · C сравнить · T тишина · L громкость · ↑↓ фразы · N пустая · Esc отмена";
+            ui.label(RichText::new(hints).size(11.0).color(FAINT));
         });
     }
 
@@ -277,7 +310,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
             // Высоту ряда задаём заранее, иначе первая кнопка прилипает к верху.
-            ui.allocate_ui_with_layout(vec2(total, 76.0), egui::Layout::left_to_right(Align::Center), |ui| {
+            ui.allocate_ui_with_layout(vec2(total, 72.0), egui::Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 20.0;
                 let orig = format!("{}  Оригинал", if playing_orig { icon::STOP } else { icon::PLAY });
                 if ui.add_sized(side, egui::Button::new(orig).shortcut_text("Space")).clicked() {
@@ -288,7 +321,7 @@ impl App {
                 }
                 let mine = format!("{}  Моя", if playing_mine { icon::STOP } else { icon::PLAY });
                 let can_play = self.mine.is_some() && !recording;
-                if ui.add_enabled_ui(can_play, |ui| ui.add_sized(side, egui::Button::new(mine).shortcut_text("M"))).inner.clicked() {
+                if ui.add_enabled_ui(can_play, |ui| ui.add_sized(side, egui::Button::new(mine).shortcut_text("Ctrl+Space"))).inner.clicked() {
                     self.toggle_play(Track::Mine);
                 }
             });
@@ -300,8 +333,8 @@ impl App {
         let enabled = self.recorder.is_some();
         let c = rect.center();
         let p = ui.painter();
-        if recording {
-            // Пульсирующее кольцо, пока идёт запись.
+        if recording || self.pending.is_some() {
+            // Пульсирующее кольцо, пока идёт запись или отсчёт.
             let t = ui.input(|i| i.time) as f32;
             let pulse = (t * 3.0).sin() * 0.5 + 0.5;
             p.circle_filled(c, 33.0 + pulse * 3.0, RED.gamma_multiply(0.18 + pulse * 0.12));
@@ -316,15 +349,26 @@ impl App {
             RED
         };
         p.circle_filled(c, 27.0, fill);
-        let glyph = if recording { icon::STOP } else { icon::MICROPHONE };
-        p.text(c, Align2::CENTER_CENTER, glyph, FontId::proportional(26.0), Color32::WHITE);
-        resp.on_hover_text(if recording { "Остановить запись (R)" } else { "Записать (R)" })
+        match self.pending {
+            Some(Pending::Countdown { started, .. }) => {
+                let left = if started.is_nan() { 3.0 } else { 3.0 - (ui.input(|i| i.time) - started) };
+                p.text(c, Align2::CENTER_CENTER, format!("{}", left.ceil().max(1.0)), FontId::new(28.0, theme::bold()), Color32::WHITE);
+            }
+            Some(Pending::Original { .. }) => {
+                p.text(c, Align2::CENTER_CENTER, icon::EAR, FontId::proportional(26.0), Color32::WHITE);
+            }
+            None => {
+                let glyph = if recording { icon::STOP } else { icon::MICROPHONE };
+                p.text(c, Align2::CENTER_CENTER, glyph, FontId::proportional(26.0), Color32::WHITE);
+            }
+        }
+        resp.on_hover_text(if recording || self.pending.is_some() { "Остановить (R)" } else { "Записать (R)" })
             .on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
     /// Волна моей записи целиком: затемнённые края — обрезано, золотые ручки можно тянуть.
     fn trim_wave(&mut self, ui: &mut egui::Ui, span: f32, head: Option<f32>) -> egui::Response {
-        let Some(raw) = self.mine_raw.clone() else {
+        let Some(raw) = self.mine_full.clone() else {
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), WAVE_HEIGHT), Sense::hover());
             theme::paint_bars(ui, rect, None, span, GOLD, "Нажми R или красную кнопку, чтобы записать");
             return resp;
@@ -426,6 +470,17 @@ impl App {
             ui.label(RichText::new("Перегруз микрофона — отодвинься или убавь усиление и перезапиши").size(12.0).color(RED));
         }
     }
+}
+
+/// Тихий переключатель-галочка. Возвращает, изменился ли.
+fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> bool {
+    let text = format!("{}  {label}", if *value { icon::CHECK_SQUARE } else { icon::SQUARE });
+    let color = if *value { GOLD } else { FAINT };
+    if ui.add(egui::Button::new(RichText::new(text).size(12.0).color(color)).frame(false)).clicked() {
+        *value = !*value;
+        return true;
+    }
+    false
 }
 
 /// Ряд виджетов по центру доступной ширины (примерная ширина ряда — `width`).

@@ -11,11 +11,44 @@ pub struct Config {
     pub input_device: Option<String>,
     /// Сразу после записи или импорта обрезать тишину по краям.
     pub auto_trim: bool,
+    /// Сразу после записи подгонять громкость под оригинал.
+    pub auto_level: bool,
+    /// Включать шумодав для новых записей.
+    pub denoise_new: bool,
+    pub pre_roll: PreRoll,
+}
+
+/// Что происходит между нажатием «Запись» и началом записи.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreRoll {
+    /// Запись начинается сразу.
+    Off,
+    /// Три сигнала с интервалом в секунду.
+    Countdown,
+    /// Сначала звучит оригинал, запись — сразу после него.
+    Original,
+}
+
+impl PreRoll {
+    pub fn label(self) -> &'static str {
+        match self {
+            PreRoll::Off => "сразу",
+            PreRoll::Countdown => "после отсчёта 3-2-1",
+            PreRoll::Original => "после прослушивания оригинала",
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { last_folder: None, input_device: None, auto_trim: true }
+        Self {
+            last_folder: None,
+            input_device: None,
+            auto_trim: true,
+            auto_level: true,
+            denoise_new: false,
+            pre_roll: PreRoll::Off,
+        }
     }
 }
 

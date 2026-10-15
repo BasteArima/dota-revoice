@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use dota_revoice::audio::{self, Clip, Player, Recorder, Track};
 use dota_revoice::encode;
+use dota_revoice::process::{self, Settings};
 use dota_revoice::game::{self, DotaInstall};
 use dota_revoice::project::{self, Line, Project, Status};
 use eframe::egui::{self, Align, Key, Modifiers, RichText};
 
-use crate::config::Config;
+use crate::config::{Config, PreRoll};
 use build::BuildState;
 use theme::{GOLD, ON_GOLD, PANEL, RED, icon};
 
@@ -39,6 +40,13 @@ enum Message {
 enum Handle {
     Start,
     End,
+}
+
+/// Подготовка к записи: отсчёт или прослушивание оригинала.
+#[derive(Clone, Copy)]
+enum Pending {
+    Countdown { started: f64, beeps: u8 },
+    Original { ended: Option<f64> },
 }
 
 /// Перетаскивание края обрезки: пока тянем, файл не пересохраняем.
@@ -65,13 +73,18 @@ pub struct App {
     scroll_to_selected: u8,
 
     original: Option<Clip>,
-    /// Моя запись целиком (исходный wav) — её показываем на волне.
-    mine_raw: Option<Clip>,
-    /// Кусок `mine_raw`, который идёт в игру, в сэмплах.
+    /// Моя запись как есть (исходный wav).
+    mine_raw: Option<Arc<Vec<f32>>>,
+    /// Запись целиком после шумодава и усиления — её показываем на волне.
+    mine_full: Option<Clip>,
+    /// Кусок `mine_full`, который идёт в игру, в сэмплах.
     trim: (usize, usize),
-    /// Обрезанная версия — её играем и сравниваем.
+    /// Шумодав и усиление выбранной фразы.
+    fx: Settings,
+    /// Готовая версия для игры — её играем и сравниваем.
     mine: Option<Clip>,
     drag: Option<TrimDrag>,
+    pending: Option<Pending>,
     player: Option<Player>,
     recorder: Option<Recorder>,
     input_devices: Vec<String>,
@@ -98,9 +111,12 @@ impl App {
             scroll_to_selected: 0,
             original: None,
             mine_raw: None,
+            mine_full: None,
             trim: (0, 0),
+            fx: Settings::default(),
             mine: None,
             drag: None,
+            pending: None,
             player: None,
             recorder: None,
             input_devices: Recorder::input_device_names(),
@@ -192,8 +208,10 @@ impl App {
         self.selected = index;
         self.scroll_to_selected = 3;
         self.clipped = false;
+        self.pending = None;
         self.original = None;
         self.mine = None;
+        self.mine_full = None;
         self.mine_raw = None;
         self.drag = None;
         let Some(line) = self.current_line() else { return };
@@ -205,9 +223,10 @@ impl App {
         self.reload_mine(&line);
     }
 
-    /// Загружает мою запись: исходный wav (если есть) и сохранённую обрезку.
+    /// Загружает мою запись: исходный wav (если есть), обрезку и обработку.
     fn reload_mine(&mut self, line: &Line) {
         self.mine = None;
+        self.mine_full = None;
         self.mine_raw = None;
         self.drag = None;
         let Some(p) = &self.project else { return };
@@ -215,55 +234,115 @@ impl App {
         if !mp3.is_file() {
             return;
         }
-        // Без wav (например, файл положили руками) обрезка от mp3 не имеет смысла.
-        let (source, trim) = if raw.is_file() { (raw, p.trim(line)) } else { (mp3, None) };
+        // Без wav (например, файл положили руками) обрезка и обработка от mp3 не имеют смысла.
+        let (source, trim, fx) =
+            if raw.is_file() { (raw, p.trim(line), p.processing(line)) } else { (mp3, None, Settings::default()) };
         match audio::decode_file(&source) {
             Ok(samples) => {
                 let len = samples.len();
-                let range = trim
+                self.trim = trim
                     .map(|(a, b)| (secs_to_index(a, len), secs_to_index(b, len)))
                     .filter(|(a, b)| b > a)
                     .unwrap_or((0, len));
-                self.mine_raw = Some(Clip::new(samples));
-                self.set_mine_slice(range);
+                self.fx = fx;
+                self.mine_raw = Some(Arc::new(samples));
+                self.render_full();
             }
             Err(e) => self.error(format!("Моя версия не читается: {e:#}")),
         }
     }
 
-    /// Пересчитывает обрезанную версию из исходника (без записи на диск).
-    fn set_mine_slice(&mut self, range: (usize, usize)) {
+    /// Пересчитывает обработанную запись целиком и кусок для игры (без записи на диск).
+    fn render_full(&mut self) {
         let Some(raw) = &self.mine_raw else { return };
-        let len = raw.samples.len();
-        self.trim = (range.0.min(len), range.1.min(len));
-        let mut part = raw.samples[self.trim.0..self.trim.1].to_vec();
-        if self.trim != (0, len) {
-            audio::fade_edges(&mut part);
-        }
-        self.mine = Some(Clip::new(part));
+        self.mine_full = Some(Clip::new(process::process(raw, self.fx)));
+        self.render_cut();
     }
 
-    /// Применяет обрезку: запоминает границы и перезаписывает mp3 для игры.
-    fn apply_trim(&mut self, range: (usize, usize)) -> anyhow::Result<()> {
+    fn render_cut(&mut self) {
+        let Some(full) = &self.mine_full else { return };
+        let len = full.samples.len();
+        self.trim = (self.trim.0.min(len), self.trim.1.min(len));
+        self.mine = Some(Clip::new(process::cut(&full.samples, self.trim)));
+    }
+
+    fn full_len(&self) -> usize {
+        self.mine_full.as_ref().map_or(0, |c| c.samples.len())
+    }
+
+    /// Запоминает обрезку и обработку и перезаписывает mp3 для игры.
+    fn save_mine(&mut self) -> anyhow::Result<()> {
         let (Some(line), Some(raw)) = (self.current_line(), self.mine_raw.clone()) else { return Ok(()) };
         if let Some(pl) = &self.player {
             pl.stop();
         }
-        self.set_mine_slice(range);
-        let len = raw.samples.len();
+        let len = raw.len();
+        let full = self.trim == (0, len);
+        let trim = (!full).then(|| (index_to_secs(self.trim.0), index_to_secs(self.trim.1)));
+        let mine = self.mine.as_ref().map(|c| c.samples.clone()).unwrap_or_default();
         let Some(p) = self.project.as_mut() else { return Ok(()) };
         let raw_path = p.raw_wav(&line);
         if !raw_path.is_file() {
-            encode::save_raw(&raw_path, &raw.samples)?;
+            encode::save_raw(&raw_path, &raw)?;
         }
-        let full = self.trim == (0, len);
-        p.set_trim(&line, (!full).then(|| (index_to_secs(self.trim.0), index_to_secs(self.trim.1))))?;
-        let mine = self.mine.as_ref().map(|c| c.samples.clone()).unwrap_or_default();
+        p.set_trim(&line, trim)?;
+        p.set_processing(&line, self.fx)?;
         encode::write_mp3(&p.export_mp3(&line), &mine)
     }
 
+    /// Применяет обрезку: запоминает границы и перезаписывает mp3 для игры.
+    fn apply_trim(&mut self, range: (usize, usize)) -> anyhow::Result<()> {
+        self.trim = range;
+        self.render_cut();
+        self.save_mine()
+    }
+
+    fn apply_fx(&mut self, fx: Settings) -> anyhow::Result<()> {
+        self.fx = fx;
+        self.render_full();
+        self.save_mine()
+    }
+
+    /// Усиление, при котором моя версия звучит так же громко, как оригинал.
+    fn measure_gain(&self) -> Option<f32> {
+        let (Some(o), Some(raw)) = (&self.original, &self.mine_raw) else { return None };
+        process::match_gain(&o.samples, raw, Settings { gain_db: 0.0, ..self.fx }, self.trim)
+    }
+
+    fn match_loudness(&mut self) {
+        if self.mine_raw.is_none() {
+            return;
+        }
+        let Some(gain) = self.measure_gain() else {
+            self.error("Не получилось измерить громкость — запись слишком короткая или тихая");
+            return;
+        };
+        match self.apply_fx(Settings { gain_db: gain, ..self.fx }) {
+            Ok(()) => self.info(format!("Громкость подогнана под оригинал: {gain:+.1} dB")),
+            Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+
+    fn toggle_denoise(&mut self) {
+        if self.mine_raw.is_none() {
+            return;
+        }
+        let mut fx = Settings { denoise: !self.fx.denoise, ..self.fx };
+        // Шумодав меняет громкость — если её подгоняли, подгоняем заново.
+        let regain = fx.gain_db != 0.0;
+        self.fx = fx;
+        if regain && let Some(gain) = self.measure_gain() {
+            fx.gain_db = gain;
+        }
+        let text = if fx.denoise { "Шумодав включён" } else { "Шумодав выключен" };
+        match self.apply_fx(fx) {
+            Ok(()) => self.info(text),
+            Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+
     fn trim_silence(&mut self) {
-        let Some(raw) = &self.mine_raw else { return };
+        let Some(raw) = &self.mine_full else { return };
         let len = raw.samples.len();
         let Some(range) = audio::detect_voice(&raw.samples) else {
             self.error("Не нашёл голос в записи — слишком тихо?");
@@ -277,7 +356,7 @@ impl App {
     }
 
     fn reset_trim(&mut self) {
-        let Some(len) = self.mine_raw.as_ref().map(|r| r.samples.len()) else { return };
+        let Some(len) = self.mine_raw.as_ref().map(|r| r.len()) else { return };
         match self.apply_trim((0, len)) {
             Ok(()) => self.info("Обрезка снята — в игру пойдёт запись целиком"),
             Err(e) => self.error(format!("{e:#}")),
@@ -341,6 +420,7 @@ impl App {
         let clip = match track {
             Track::Original => self.original.as_ref().map(|c| c.samples.clone()),
             Track::Mine => self.mine.as_ref().map(|c| c.samples.clone()),
+            Track::Cue => None,
             Track::Compare => {
                 let (Some(o), Some(m)) = (&self.original, &self.mine) else { return };
                 let gap = (COMPARE_GAP_SECS * audio::RATE as f32) as usize;
@@ -365,17 +445,77 @@ impl App {
             self.error("Микрофон не открыт — выбери его вверху");
             return;
         };
-        if !rec.is_recording() {
+        if self.pending.take().is_some() {
             if let Some(p) = &self.player {
                 p.stop();
             }
-            self.clipped = false;
-            rec.start();
+            self.info("Запись отменена");
+            return;
+        }
+        if !rec.is_recording() {
+            match self.config.pre_roll {
+                PreRoll::Off => self.start_recording(),
+                PreRoll::Countdown => self.pending = Some(Pending::Countdown { started: f64::NAN, beeps: 0 }),
+                PreRoll::Original if self.original.is_some() => {
+                    if let (Some(p), Some(o)) = (&self.player, &self.original) {
+                        p.play(Track::Original, o.samples.clone());
+                    }
+                    self.pending = Some(Pending::Original { ended: None });
+                }
+                PreRoll::Original => self.start_recording(),
+            }
             return;
         }
         match rec.stop() {
             Ok(samples) => self.store_take(samples, "Записано"),
             Err(e) => self.error(format!("Запись не сохранилась: {e:#}")),
+        }
+    }
+
+    fn start_recording(&mut self) {
+        if let Some(p) = &self.player {
+            p.stop();
+        }
+        self.clipped = false;
+        if let Some(r) = &self.recorder {
+            r.start();
+        }
+    }
+
+    /// Ведёт отсчёт или ждёт конца оригинала, потом включает запись.
+    fn tick_pending(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending else { return };
+        let now = ctx.input(|i| i.time);
+        match pending {
+            Pending::Countdown { started, beeps } => {
+                let started = if started.is_nan() { now } else { started };
+                let elapsed = now - started;
+                if elapsed >= 3.0 {
+                    self.pending = None;
+                    self.start_recording();
+                    return;
+                }
+                let mut beeps = beeps;
+                if (beeps as f64) <= elapsed {
+                    if let Some(p) = &self.player {
+                        p.play(Track::Cue, Arc::new(audio::beep(880.0, 0.09)));
+                    }
+                    beeps += 1;
+                }
+                self.pending = Some(Pending::Countdown { started, beeps });
+            }
+            Pending::Original { ended: None } => {
+                if !self.player.as_ref().is_some_and(|p| p.is_playing(Track::Original)) {
+                    self.pending = Some(Pending::Original { ended: Some(now) });
+                }
+            }
+            Pending::Original { ended: Some(t) } => {
+                // Короткая пауза после оригинала, чтобы успеть вдохнуть.
+                if now - t >= 0.35 {
+                    self.pending = None;
+                    self.start_recording();
+                }
+            }
         }
     }
 
@@ -406,19 +546,36 @@ impl App {
             return;
         }
         let len = samples.len();
-        let range = if self.config.auto_trim { audio::detect_voice(&samples).unwrap_or((0, len)) } else { (0, len) };
-        self.mine_raw = Some(Clip::new(samples));
-        let result = self.apply_trim(range).and_then(|_| match self.project.as_mut() {
+        self.mine_raw = Some(Arc::new(samples));
+        self.fx = Settings { denoise: self.config.denoise_new, gain_db: 0.0 };
+        self.trim = (0, len);
+        self.render_full();
+        // Тишину ищем уже после шумодава — так границы точнее.
+        if self.config.auto_trim
+            && let Some(full) = &self.mine_full
+        {
+            self.trim = audio::detect_voice(&full.samples).unwrap_or((0, len));
+            self.render_cut();
+        }
+        if self.config.auto_level
+            && let Some(gain) = self.measure_gain()
+        {
+            self.fx.gain_db = gain;
+            self.render_full();
+        }
+        let result = self.save_mine().and_then(|_| match self.project.as_mut() {
             Some(p) => p.mark_recorded(&line),
             None => Ok(()),
         });
+        let mut done = vec![format!("{verb}: {}", mp3.display())];
+        if self.trim != (0, len) {
+            done.push(format!("тишина обрезана, {:.1} из {secs:.1} с", index_to_secs(self.trim.1 - self.trim.0)));
+        }
+        if self.fx.gain_db != 0.0 {
+            done.push(format!("громкость {:+.1} dB", self.fx.gain_db));
+        }
         match result {
-            Ok(()) if range != (0, len) => self.info(format!(
-                "{verb}: {} — тишина обрезана, {:.1} из {secs:.1} с",
-                mp3.display(),
-                index_to_secs(range.1 - range.0)
-            )),
-            Ok(()) => self.info(format!("{verb}: {} ({secs:.1} с)", mp3.display())),
+            Ok(()) => self.info(done.join(" · ")),
             Err(e) => self.error(format!("Не сохранилось: {e:#}")),
         }
     }
@@ -442,6 +599,7 @@ impl App {
         match p.trash(&line) {
             Ok(()) => {
                 self.mine = None;
+                self.mine_full = None;
                 self.mine_raw = None;
                 self.info(format!("{} перенесена в корзину: {}", line.name, trash_dir.display()));
             }
@@ -454,15 +612,16 @@ impl App {
             return;
         }
         // Забираем клавиши до виджетов, чтобы пробел не «нажимал» кнопку в фокусе.
+        // Ctrl+Space проверяем раньше обычного пробела, чтобы его не перехватил Space.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Space)) {
+            self.toggle_play(Track::Mine);
+        }
         let pressed = |key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key));
         if pressed(Key::Space) {
             self.toggle_play(Track::Original);
         }
         if pressed(Key::R) {
             self.toggle_record();
-        }
-        if pressed(Key::M) {
-            self.toggle_play(Track::Mine);
         }
         if pressed(Key::C) {
             self.toggle_play(Track::Compare);
@@ -479,10 +638,16 @@ impl App {
         if pressed(Key::T) {
             self.trim_silence();
         }
+        if pressed(Key::L) {
+            self.match_loudness();
+        }
         if pressed(Key::Delete) {
             self.trash_current();
         }
         if pressed(Key::Escape) {
+            if self.pending.take().is_some() {
+                self.info("Запись отменена");
+            }
             if let Some(r) = &self.recorder
                 && r.is_recording()
             {
@@ -571,6 +736,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_keys(ctx);
+        self.tick_pending(ctx);
         self.poll_build_tasks();
 
         let bar_frame = egui::Frame::side_top_panel(&ctx.style()).fill(PANEL).inner_margin(egui::Margin::symmetric(14, 10));
@@ -587,7 +753,10 @@ impl eframe::App for App {
                     .show(ctx, |ui| self.line_list(ui));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 16)))
-                    .show(ctx, |ui| self.editor(ui));
+                    .show(ctx, |ui| {
+                        // На маленьком экране правая часть прокручивается, а не обрезается.
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.editor(ui));
+                    });
             }
             Screen::Build => {
                 egui::CentralPanel::default()
@@ -597,7 +766,10 @@ impl eframe::App for App {
         }
 
         // Анимация волны, индикатора и кнопки записи; в покое — редкая перерисовка.
-        let busy = self.player.as_ref().is_some_and(|p| p.now_playing().is_some()) || self.is_recording() || self.build.busy();
+        let busy = self.player.as_ref().is_some_and(|p| p.now_playing().is_some())
+            || self.is_recording()
+            || self.pending.is_some()
+            || self.build.busy();
         ctx.request_repaint_after(if busy { Duration::from_millis(16) } else { Duration::from_millis(60) });
     }
 

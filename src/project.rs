@@ -48,6 +48,12 @@ struct State {
     /// Заметки пользователя к фразам: «покупка BKB» и т.п.
     #[serde(default)]
     notes: BTreeMap<String, String>,
+    /// Усиление моей версии, dB (подгонка громкости под оригинал).
+    #[serde(default)]
+    gains: BTreeMap<String, f32>,
+    /// Фразы, к которым применён шумодав.
+    #[serde(default)]
+    denoise: BTreeSet<String>,
 }
 
 pub struct Project {
@@ -156,6 +162,26 @@ impl Project {
         if changed { self.save_state() } else { Ok(()) }
     }
 
+    /// Шумодав и усиление для фразы.
+    pub fn processing(&self, line: &Line) -> crate::process::Settings {
+        let key = self.resource_path(line);
+        crate::process::Settings {
+            denoise: self.state.denoise.contains(&key),
+            gain_db: self.state.gains.get(&key).copied().unwrap_or(0.0),
+        }
+    }
+
+    pub fn set_processing(&mut self, line: &Line, s: crate::process::Settings) -> Result<()> {
+        let key = self.resource_path(line);
+        let denoise_changed = if s.denoise { self.state.denoise.insert(key.clone()) } else { self.state.denoise.remove(&key) };
+        let gain_changed = if s.gain_db.abs() < 0.05 {
+            self.state.gains.remove(&key).is_some()
+        } else {
+            self.state.gains.insert(key, s.gain_db) != Some(s.gain_db)
+        };
+        if denoise_changed || gain_changed { self.save_state() } else { Ok(()) }
+    }
+
     pub fn note(&self, line: &Line) -> &str {
         self.state.notes.get(&self.resource_path(line)).map_or("", String::as_str)
     }
@@ -192,6 +218,7 @@ impl Project {
         }
         self.recorded.remove(&line.name);
         self.set_trim(line, None)?;
+        self.set_processing(line, crate::process::Settings::default())?;
         self.set_redo(line, false)
     }
 }
