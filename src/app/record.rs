@@ -463,18 +463,24 @@ impl App {
 
     /// Инструменты для моей версии: две подписанные строки — «Обрезка» и «Звук».
     fn edit_tools(&mut self, ui: &mut egui::Ui) {
-        const LABEL_W: f32 = 74.0;
-        let label = |ui: &mut egui::Ui, icon: &str, text: &str| {
-            ui.add_sized(vec2(LABEL_W, 26.0), egui::Label::new(RichText::new(format!("{icon}  {text}")).size(13.0).color(MUTED)));
-        };
+        // Сетка: подписи слева, в каждой колонке кнопки одной ширины,
+        // подсказка обрезки и тон — в одной последней колонке.
+        const MAIN: egui::Vec2 = vec2(236.0, 30.0);
+        const SECOND: egui::Vec2 = vec2(136.0, 30.0);
         let trimmed = self.trim != (0, self.full_len());
+        let label = |ui: &mut egui::Ui, icon: &str, text: &str| {
+            ui.label(RichText::new(format!("{icon}  {text}")).size(13.0).color(MUTED));
+        };
 
-        ui.horizontal(|ui| {
+        ui.add_space(2.0);
+        ui.separator();
+        ui.add_space(2.0);
+        egui::Grid::new("edit_tools").num_columns(4).spacing([10.0, 8.0]).show(ui, |ui| {
             label(ui, icon::SCISSORS, "Обрезка");
-            if ui.add(theme::tool("Убрать тишину по краям").shortcut_text("T")).clicked() {
+            if ui.add_sized(MAIN, theme::tool("Убрать тишину по краям").shortcut_text("T")).clicked() {
                 self.trim_silence();
             }
-            if ui.add_enabled(trimmed, theme::tool("Без обрезки")).clicked() {
+            if ui.add_enabled_ui(trimmed, |ui| ui.add_sized(SECOND, theme::tool("Без обрезки"))).inner.clicked() {
                 self.reset_trim();
             }
             let hint = if trimmed {
@@ -483,11 +489,10 @@ impl App {
                 "или тяни золотые края на волне".to_owned()
             };
             ui.label(RichText::new(hint).size(12.0).color(FAINT));
-        });
+            ui.end_row();
 
-        ui.horizontal(|ui| {
             label(ui, icon::SPEAKER_HIGH, "Звук");
-            if ui.add(theme::tool("Громкость как в оригинале").shortcut_text("L")).clicked() {
+            if ui.add_sized(MAIN, theme::tool("Громкость как в оригинале").shortcut_text("L")).clicked() {
                 self.match_loudness();
             }
             let denoise = self.fx.denoise;
@@ -495,24 +500,26 @@ impl App {
             if denoise {
                 btn = btn.fill(GOLD.gamma_multiply(0.12)).stroke(Stroke::new(1.0_f32, GOLD.gamma_multiply(0.6)));
             }
-            if ui.add(btn).on_hover_text("Убрать шум комнаты и фон (RNNoise)").clicked() {
+            if ui.add_sized(SECOND, btn).on_hover_text("Убрать шум комнаты и фон (RNNoise)").clicked() {
                 self.toggle_denoise();
             }
-            ui.add_space(10.0);
-            ui.label(RichText::new("Тон").size(13.0).color(MUTED));
-            let pitch = self.fx.pitch;
-            let step = |t: &str| egui::Button::new(RichText::new(t).size(13.0)).min_size(vec2(28.0, 26.0));
-            if ui.add_enabled(pitch > -12.0, step(icon::MINUS)).on_hover_text("На полутон ниже — грубее и массивнее").clicked() {
-                self.set_pitch(pitch - 1.0);
-            }
-            let value = if pitch == 0.0 { "0".to_owned() } else { format!("{pitch:+.0}") };
-            ui.add_sized(vec2(24.0, 26.0), egui::Label::new(RichText::new(value).size(13.0).color(if pitch == 0.0 { MUTED } else { GOLD })));
-            if ui.add_enabled(pitch < 12.0, step(icon::PLUS)).on_hover_text("На полутон выше — мельче и звонче").clicked() {
-                self.set_pitch(pitch + 1.0);
-            }
-            if pitch != 0.0 && theme::ghost(ui, true, "сбросить").clicked() {
-                self.set_pitch(0.0);
-            }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Тон").size(13.0).color(MUTED));
+                let pitch = self.fx.pitch;
+                let step = |t: &str| egui::Button::new(RichText::new(t).size(13.0)).min_size(vec2(30.0, 30.0));
+                if ui.add_enabled(pitch > -12.0, step(icon::MINUS)).on_hover_text("На полутон ниже — грубее и массивнее").clicked() {
+                    self.set_pitch(pitch - 1.0);
+                }
+                let value = if pitch == 0.0 { "0".to_owned() } else { format!("{pitch:+.0}") };
+                ui.add_sized(vec2(26.0, 30.0), egui::Label::new(RichText::new(value).size(13.0).color(if pitch == 0.0 { MUTED } else { GOLD })));
+                if ui.add_enabled(pitch < 12.0, step(icon::PLUS)).on_hover_text("На полутон выше — мельче и звонче").clicked() {
+                    self.set_pitch(pitch + 1.0);
+                }
+                if pitch != 0.0 && theme::ghost(ui, true, "сбросить").clicked() {
+                    self.set_pitch(0.0);
+                }
+            });
+            ui.end_row();
         });
     }
 
