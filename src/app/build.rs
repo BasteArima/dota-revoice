@@ -121,6 +121,8 @@ enum StepState {
     Done,
     Current,
     Later,
+    /// Не по порядку, но пользоваться уже можно (переключатель мода, пока пак пересобирается).
+    Ready,
 }
 
 impl App {
@@ -271,7 +273,12 @@ impl App {
 
                 self.step_build(ui, &ctx, &snap, state(1));
                 ui.add_space(10.0);
-                self.step_install(ui, &ctx, &snap, state(2));
+                // Мод уже в игре — переключатель и «Убрать из игры» доступны без пересборки.
+                let install_state = match state(2) {
+                    StepState::Later if snap.mod_state != ModState::Absent => StepState::Ready,
+                    s => s,
+                };
+                self.step_install(ui, &ctx, &snap, install_state);
                 ui.add_space(10.0);
                 self.step_launch(ui, &snap, current, state(3));
                 ui.add_space(22.0);
@@ -387,7 +394,8 @@ impl App {
                     ui.label(theme::small(text));
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
-                        let stale = snap.built.is_some() && snap.installed != Installed::Same;
+                        // Свежая сборка ещё не в игре. Пока пак надо пересобрать — сначала шаг 1.
+                        let stale = snap.built.is_some() && snap.installed != Installed::Same && !snap.needs_rebuild();
                         if stale && ui.add(theme::primary(format!("{}  Обновить пак", icon::ARROWS_CLOCKWISE))).on_hover_text("Положить в игру свежую сборку").clicked() {
                             self.ask(GameAction::Install);
                         }
@@ -593,6 +601,10 @@ fn step_card(ui: &mut egui::Ui, n: u8, state: StepState, add: impl FnOnce(&mut e
                 StepState::Later => {
                     p.circle_stroke(c, 12.5, Stroke::new(1.0_f32, LINE));
                     p.text(c, Align2::CENTER_CENTER, n.to_string(), font, FAINT);
+                }
+                StepState::Ready => {
+                    p.circle_stroke(c, 12.5, Stroke::new(1.0_f32, MUTED));
+                    p.text(c, Align2::CENTER_CENTER, n.to_string(), font, TEXT);
                 }
             }
             ui.add_space(4.0);
