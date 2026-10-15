@@ -87,6 +87,8 @@ pub struct App {
     pending: Option<Pending>,
     /// Прежние дубли выбранной фразы.
     takes: Vec<Take>,
+    /// Ширина переключателя вкладок с прошлого кадра — чтобы поставить его по центру.
+    tabs_width: f32,
     player: Option<Player>,
     recorder: Option<Recorder>,
     input_devices: Vec<String>,
@@ -120,6 +122,7 @@ impl App {
             drag: None,
             pending: None,
             takes: Vec::new(),
+            tabs_width: 270.0,
             player: None,
             recorder: None,
             input_devices: Recorder::input_device_names(),
@@ -737,10 +740,11 @@ impl App {
             } else if ui.add(theme::primary(format!("{}  Открыть папку", icon::FOLDER_OPEN))).clicked() {
                 self.pick_folder();
             }
-            ui.add_space(10.0);
 
-            // Вкладки — сегментированный переключатель.
-            egui::Frame::default().fill(theme::BG).corner_radius(10).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
+            // Вкладки — сегментированный переключатель ровно по центру окна.
+            let gap = ui.max_rect().center().x - self.tabs_width / 2.0 - ui.cursor().min.x;
+            ui.add_space(gap.max(10.0));
+            let tabs = egui::Frame::default().fill(theme::BG).corner_radius(10).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 for (screen, label) in [(Screen::Record, "Запись"), (Screen::Build, "Сборка и установка")] {
                     let on = self.screen == screen;
@@ -754,6 +758,7 @@ impl App {
                     }
                 }
             });
+            self.tabs_width = tabs.response.rect.width();
 
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 let current = self.recorder.as_ref().map(|r| r.device_name.clone()).unwrap_or_else(|| "нет микрофона".into());

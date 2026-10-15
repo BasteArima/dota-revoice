@@ -9,7 +9,7 @@ use super::build::ago;
 use super::{App, Handle, MIN_TRIM_SAMPLES, Pending, TrimDrag, index_to_secs, prefix_of};
 use crate::config::PreRoll;
 
-const WAVE_HEIGHT: f32 = 72.0;
+const WAVE_HEIGHT: f32 = 62.0;
 
 impl App {
     pub(super) fn line_list(&mut self, ui: &mut egui::Ui) {
@@ -59,7 +59,8 @@ impl App {
         self.scroll_to_selected = self.scroll_to_selected.saturating_sub(1);
         let mut clicked = None;
         let mut toggle_group = None;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let mut selected_rect = None;
+        let out = egui::ScrollArea::vertical().id_salt("lines").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             for (cat, idx) in &self.groups {
                 let shown: Vec<usize> = idx.iter().copied().filter(|&i| self.matches(i, &q)).collect();
@@ -83,12 +84,24 @@ impl App {
                     if resp.clicked() {
                         clicked = Some(i);
                     }
-                    if scroll && i == self.selected {
-                        resp.scroll_to_me(Some(Align::Center));
+                    if i == self.selected {
+                        selected_rect = Some(resp.rect);
                     }
                 }
             }
         });
+        // Докручиваем только сам список. Общий `scroll_to_me` egui задевал и правую
+        // прокручиваемую часть — она съезжала вниз при выборе фразы.
+        if scroll
+            && let Some(r) = selected_rect
+            && !out.inner_rect.shrink2(vec2(0.0, 24.0)).contains_rect(r)
+        {
+            let mut state = out.state;
+            let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+            state.offset.y = (state.offset.y + r.center().y - out.inner_rect.center().y).clamp(0.0, max);
+            state.store(ui.ctx(), out.id);
+            ui.ctx().request_repaint();
+        }
         if let Some(cat) = toggle_group
             && !self.collapsed.remove(&cat)
         {
@@ -127,8 +140,19 @@ impl App {
                 Status::Recorded => theme::pill(ui, "записано", GREEN),
                 Status::Redo => theme::pill(ui, "переделать", AMBER),
             }
+            if status != Status::Empty && !recording {
+                ui.add_space(6.0);
+                let redo = status == Status::Redo;
+                let (text, color) = if redo { ("Готово, не переделывать", AMBER) } else { ("Пометить: переделать", MUTED) };
+                if theme::ghost_colored(ui, true, format!("{}  {text}", icon::FLAG), color).clicked() {
+                    self.set_redo(!redo);
+                }
+                if theme::ghost(ui, true, format!("{}  В корзину", icon::TRASH)).on_hover_text("Моя версия уйдёт в export/.trash (Del)").clicked() {
+                    self.trash_current();
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(theme::ghost(format!("Следующая пустая  {}", icon::SKIP_FORWARD))).on_hover_text("N").clicked() {
+                if theme::ghost(ui, true, format!("Следующая пустая  {}", icon::SKIP_FORWARD)).on_hover_text("N").clicked() {
                     self.next_unrecorded();
                 }
                 if ui.add(egui::Button::new(icon::CARET_RIGHT).min_size(vec2(30.0, 28.0))).on_hover_text("Следующая (↓)").clicked() {
@@ -246,93 +270,83 @@ impl App {
             }
             self.level_meter(ui);
             if self.mine_raw.is_some() && !recording {
-                self.pitch_row(ui);
+                ui.add_space(4.0);
+                self.edit_tools(ui);
             }
         });
-        ui.add_space(16.0);
+        ui.add_space(8.0);
 
         self.transport(ui, head(Track::Original).is_some(), head(Track::Mine).is_some(), recording);
         ui.add_space(10.0);
 
-        // Второстепенные действия — тихие кнопки по центру.
-        let can_edit = self.mine_raw.is_some() && !recording;
-        let trimmed = self.mine_raw.is_some() && self.trim != (0, self.full_len());
-        centered(ui, 730.0, |ui| {
-            if ui.add_enabled(self.mine.is_some() && self.original.is_some(), theme::ghost(format!("{}  Сравнить", icon::ARROWS_LEFT_RIGHT))).on_hover_text("Оригинал, потом моя (C)").clicked() {
-                self.toggle_play(Track::Compare);
-            }
-            if ui.add_enabled(can_edit, theme::ghost(format!("{}  Тишина", icon::SCISSORS))).on_hover_text("Обрезать тишину по краям (T)").clicked() {
-                self.trim_silence();
-            }
-            if ui.add_enabled(can_edit && trimmed, theme::ghost("Без обрезки")).clicked() {
-                self.reset_trim();
-            }
-            if ui.add_enabled(can_edit, theme::ghost(format!("{}  Громкость", icon::SPEAKER_HIGH))).on_hover_text("Подогнать громкость под оригинал (L)").clicked() {
-                self.match_loudness();
-            }
-            let denoise = self.fx.denoise;
-            let denoise_btn = egui::Button::new(RichText::new(format!("{}  Шумодав", icon::WAVEFORM)).color(if denoise { GOLD } else { MUTED })).frame(false);
-            if ui.add_enabled(can_edit, denoise_btn).on_hover_text("Убрать шум комнаты и фон (RNNoise)").clicked() {
-                self.toggle_denoise();
-            }
-            if ui.add_enabled(!recording, theme::ghost(format!("{}  Из файла", icon::FILE_ARROW_DOWN))).clicked() {
-                self.import_file();
-            }
-            let redo = status == Status::Redo;
-            let redo_btn = egui::Button::new(RichText::new(format!("{}  Переделать", icon::FLAG)).color(if redo { AMBER } else { MUTED })).frame(false);
-            if ui.add_enabled(status != Status::Empty && !recording, redo_btn).clicked() {
-                self.set_redo(!redo);
-            }
-            if ui.add_enabled(status != Status::Empty && !recording, theme::ghost(format!("{}  В корзину", icon::TRASH))).on_hover_text("Del").clicked() {
-                self.trash_current();
-            }
-        });
-        ui.add_space(6.0);
-        // Что делать с новой записью — общие настройки, а не для одной фразы.
-        centered(ui, 650.0, |ui| {
-            ui.label(RichText::new("После записи:").size(12.0).color(FAINT));
-            let mut changed = false;
-            changed |= toggle(ui, &mut self.config.auto_trim, "обрезать тишину");
-            changed |= toggle(ui, &mut self.config.auto_level, "подогнать громкость");
-            changed |= toggle(ui, &mut self.config.denoise_new, "шумодав");
-            ui.label(RichText::new("· запись начинается").size(12.0).color(FAINT));
-            egui::ComboBox::from_id_salt("pre_roll").selected_text(RichText::new(self.config.pre_roll.label()).size(12.0)).show_ui(ui, |ui| {
-                for mode in [PreRoll::Off, PreRoll::Countdown, PreRoll::Original] {
-                    changed |= ui.selectable_value(&mut self.config.pre_roll, mode, mode.label()).changed();
+        // Настройки новой записи — общие для всех фраз, поэтому отдельной плашкой.
+        ui.add_space(4.0);
+        centered(ui, 760.0, |ui| {
+            egui::Frame::default().fill(theme::PANEL).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(12).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                ui.label(RichText::new("Новая запись:").size(13.0).color(MUTED));
+                let mut changed = false;
+                for (value, text) in [
+                    (&mut self.config.auto_trim, "убрать тишину"),
+                    (&mut self.config.auto_level, "подогнать громкость"),
+                    (&mut self.config.denoise_new, "шумодав"),
+                ] {
+                    if theme::chip(ui, *value, text).clicked() {
+                        *value = !*value;
+                        changed = true;
+                    }
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new("старт:").size(13.0).color(MUTED));
+                egui::ComboBox::from_id_salt("pre_roll").selected_text(RichText::new(self.config.pre_roll.label()).size(13.0)).show_ui(ui, |ui| {
+                    for mode in [PreRoll::Off, PreRoll::Countdown, PreRoll::Original] {
+                        changed |= ui.selectable_value(&mut self.config.pre_roll, mode, mode.label()).changed();
+                    }
+                });
+                if changed {
+                    self.config.save();
                 }
             });
-            if changed {
-                self.config.save();
-            }
         });
 
         ui.add_space(10.0);
         ui.vertical_centered(|ui| {
-            let hints = "Space оригинал · Ctrl+Space моя · R запись · C сравнить · T тишина · L громкость · ↑↓ фразы · N пустая · Esc отмена";
+            let hints = "Space оригинал · Ctrl+Space моя · R запись · C сравнить · T убрать тишину · L громкость · ↑↓ фразы · N пустая · Esc отмена";
             ui.label(RichText::new(hints).size(11.0).color(FAINT));
         });
     }
 
-    /// Большая красная кнопка записи и кнопки прослушивания по бокам.
+    /// Ряд записи: слева слушаем оригинал, справа свою версию, по центру — запись.
+    /// «Из файла» — альтернатива записи, поэтому стоит в этом же ряду.
     fn transport(&mut self, ui: &mut egui::Ui, playing_orig: bool, playing_mine: bool, recording: bool) {
-        let side = vec2(150.0, 34.0);
-        let total = side.x * 2.0 + 72.0 + 40.0;
+        let main = vec2(150.0, 34.0);
+        let extra = vec2(124.0, 34.0);
+        let gap = 14.0;
+        let total = main.x * 2.0 + extra.x * 2.0 + 72.0 + gap * 4.0;
+        let can_compare = self.mine.is_some() && self.original.is_some() && !recording;
+        let can_play = self.mine.is_some() && !recording;
         ui.horizontal(|ui| {
             ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
             // Высоту ряда задаём заранее, иначе первая кнопка прилипает к верху.
             ui.allocate_ui_with_layout(vec2(total, 72.0), egui::Layout::left_to_right(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 20.0;
+                ui.spacing_mut().item_spacing.x = gap;
+                let compare = egui::Button::new(format!("{}  Сравнить", icon::ARROWS_LEFT_RIGHT)).shortcut_text("C");
+                if ui.add_enabled_ui(can_compare, |ui| ui.add_sized(extra, compare)).inner.on_hover_text("Оригинал, а сразу за ним моя версия").clicked() {
+                    self.toggle_play(Track::Compare);
+                }
                 let orig = format!("{}  Оригинал", if playing_orig { icon::STOP } else { icon::PLAY });
-                if ui.add_sized(side, egui::Button::new(orig).shortcut_text("Space")).clicked() {
+                if ui.add_sized(main, egui::Button::new(orig).shortcut_text("Space")).clicked() {
                     self.toggle_play(Track::Original);
                 }
                 if self.record_button(ui, recording).clicked() {
                     self.toggle_record();
                 }
                 let mine = format!("{}  Моя", if playing_mine { icon::STOP } else { icon::PLAY });
-                let can_play = self.mine.is_some() && !recording;
-                if ui.add_enabled_ui(can_play, |ui| ui.add_sized(side, egui::Button::new(mine).shortcut_text("Ctrl+Space"))).inner.clicked() {
+                if ui.add_enabled_ui(can_play, |ui| ui.add_sized(main, egui::Button::new(mine).shortcut_text("Ctrl+Space"))).inner.clicked() {
                     self.toggle_play(Track::Mine);
+                }
+                let import = egui::Button::new(format!("{}  Из файла", icon::FILE_ARROW_DOWN));
+                if ui.add_enabled_ui(!recording, |ui| ui.add_sized(extra, import)).inner.on_hover_text("mp3, wav, ogg, голосовые Telegram…").clicked() {
+                    self.import_file();
                 }
             });
         });
@@ -448,25 +462,58 @@ impl App {
         resp
     }
 
-    /// Тон голоса: по полутону вниз или вверх, длительность не меняется.
-    fn pitch_row(&mut self, ui: &mut egui::Ui) {
+    /// Инструменты для моей версии: две подписанные строки — «Обрезка» и «Звук».
+    fn edit_tools(&mut self, ui: &mut egui::Ui) {
+        const LABEL_W: f32 = 74.0;
+        let label = |ui: &mut egui::Ui, icon: &str, text: &str| {
+            ui.add_sized(vec2(LABEL_W, 26.0), egui::Label::new(RichText::new(format!("{icon}  {text}")).size(13.0).color(MUTED)));
+        };
+        let trimmed = self.trim != (0, self.full_len());
+
         ui.horizontal(|ui| {
-            ui.label(RichText::new(icon::MUSIC_NOTE).size(12.0).color(FAINT));
-            ui.label(RichText::new("Тон голоса").size(12.0).color(MUTED));
+            label(ui, icon::SCISSORS, "Обрезка");
+            if ui.add(theme::tool("Убрать тишину по краям").shortcut_text("T")).clicked() {
+                self.trim_silence();
+            }
+            if ui.add_enabled(trimmed, theme::tool("Без обрезки")).clicked() {
+                self.reset_trim();
+            }
+            let hint = if trimmed {
+                format!("в игру идёт {:.2}–{:.2} с · края можно двигать", index_to_secs(self.trim.0), index_to_secs(self.trim.1))
+            } else {
+                "или тяни золотые края на волне".to_owned()
+            };
+            ui.label(RichText::new(hint).size(12.0).color(FAINT));
+        });
+
+        ui.horizontal(|ui| {
+            label(ui, icon::SPEAKER_HIGH, "Звук");
+            if ui.add(theme::tool("Громкость как в оригинале").shortcut_text("L")).clicked() {
+                self.match_loudness();
+            }
+            let denoise = self.fx.denoise;
+            let mut btn = theme::tool(format!("{}  Шумодав", if denoise { icon::CHECK_SQUARE } else { icon::SQUARE }));
+            if denoise {
+                btn = btn.fill(GOLD.gamma_multiply(0.12)).stroke(Stroke::new(1.0_f32, GOLD.gamma_multiply(0.6)));
+            }
+            if ui.add(btn).on_hover_text("Убрать шум комнаты и фон (RNNoise)").clicked() {
+                self.toggle_denoise();
+            }
+            ui.add_space(10.0);
+            ui.label(RichText::new("Тон").size(13.0).color(MUTED));
             let pitch = self.fx.pitch;
-            let small_btn = |t: &str| egui::Button::new(RichText::new(t).size(12.0)).min_size(vec2(24.0, 22.0));
-            if ui.add_enabled(pitch > -12.0, small_btn(icon::MINUS)).on_hover_text("На полутон ниже").clicked() {
+            let step = |t: &str| egui::Button::new(RichText::new(t).size(13.0)).min_size(vec2(28.0, 26.0));
+            if ui.add_enabled(pitch > -12.0, step(icon::MINUS)).on_hover_text("На полутон ниже — грубее и массивнее").clicked() {
                 self.set_pitch(pitch - 1.0);
             }
             let value = if pitch == 0.0 { "0".to_owned() } else { format!("{pitch:+.0}") };
-            ui.label(RichText::new(value).size(12.0).color(if pitch == 0.0 { MUTED } else { GOLD }));
-            if ui.add_enabled(pitch < 12.0, small_btn(icon::PLUS)).on_hover_text("На полутон выше").clicked() {
+            ui.add_sized(vec2(24.0, 26.0), egui::Label::new(RichText::new(value).size(13.0).color(if pitch == 0.0 { MUTED } else { GOLD })));
+            if ui.add_enabled(pitch < 12.0, step(icon::PLUS)).on_hover_text("На полутон выше — мельче и звонче").clicked() {
                 self.set_pitch(pitch + 1.0);
             }
-            if pitch != 0.0 && ui.add(theme::ghost("сбросить")).clicked() {
+            if pitch != 0.0 && theme::ghost(ui, true, "сбросить").clicked() {
                 self.set_pitch(0.0);
             }
-            ui.label(RichText::new("· ниже — грубее и массивнее, выше — мельче").size(11.0).color(FAINT));
         });
     }
 
@@ -544,17 +591,6 @@ enum TakeAction {
     Play,
     Restore,
     Trash,
-}
-
-/// Тихий переключатель-галочка. Возвращает, изменился ли.
-fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> bool {
-    let text = format!("{}  {label}", if *value { icon::CHECK_SQUARE } else { icon::SQUARE });
-    let color = if *value { GOLD } else { FAINT };
-    if ui.add(egui::Button::new(RichText::new(text).size(12.0).color(color)).frame(false)).clicked() {
-        *value = !*value;
-        return true;
-    }
-    false
 }
 
 /// Ряд виджетов по центру доступной ширины (примерная ширина ряда — `width`).

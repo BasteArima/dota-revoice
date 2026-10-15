@@ -137,9 +137,48 @@ pub fn primary(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(RichText::new(text.into()).color(ON_GOLD).strong()).fill(GOLD).stroke(Stroke::NONE)
 }
 
-/// Тихая кнопка без рамки — для второстепенных действий.
-pub fn ghost(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text.into()).color(MUTED)).frame(false)
+/// Тихая кнопка без рамки: при наведении подсвечивается фон и текст.
+pub fn ghost(ui: &mut egui::Ui, enabled: bool, text: impl Into<String>) -> egui::Response {
+    ghost_colored(ui, enabled, text, MUTED)
+}
+
+pub fn ghost_colored(ui: &mut egui::Ui, enabled: bool, text: impl Into<String>, color: Color32) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let galley = egui::WidgetText::from(RichText::new(text.into()).size(13.0)).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            TextStyle::Button,
+        );
+        let pad = vec2(8.0, 5.0);
+        let (rect, resp) = ui.allocate_exact_size(galley.size() + pad * 2.0, egui::Sense::click());
+        if ui.is_rect_visible(rect) {
+            let hovered = resp.hovered() && enabled;
+            if hovered {
+                ui.painter().rect_filled(rect, 7.0, CARD_HOVER);
+            }
+            let c = if !enabled { FAINT } else if hovered { TEXT } else { color };
+            ui.painter().galley(rect.min + pad, galley, c);
+        }
+        if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
+    })
+    .inner
+}
+
+/// Кнопка-инструмент с рамкой (рамка и подсветка — из темы).
+pub fn tool(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text.into()).size(13.0))
+}
+
+/// Переключатель-чип: включённый — с золотой рамкой и подсветкой.
+pub fn chip(ui: &mut egui::Ui, on: bool, text: &str) -> egui::Response {
+    let mark = if on { icon::CHECK_SQUARE } else { icon::SQUARE };
+    let label = RichText::new(format!("{mark}  {text}")).size(13.0).color(if on { GOLD } else { MUTED });
+    let mut btn = egui::Button::new(label).corner_radius(99);
+    if on {
+        btn = btn.fill(GOLD.gamma_multiply(0.12)).stroke(Stroke::new(1.0_f32, GOLD.gamma_multiply(0.6)));
+    }
+    ui.add(btn)
 }
 
 pub fn small(text: impl Into<String>) -> RichText {

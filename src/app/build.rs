@@ -338,8 +338,8 @@ impl App {
                             self.build.game_result = None;
                             self.build.dota_running = install::is_dota_running();
                         }
-                        let rollback = theme::ghost(format!("{}  Откатить", icon::ARROW_COUNTER_CLOCKWISE));
-                        if ui.add_enabled(snap.has_changes, rollback).on_hover_text("Убрать наш пак и вернуть озвучку Valve").clicked() {
+                        let rollback = theme::ghost(ui, snap.has_changes, format!("{}  Откатить", icon::ARROW_COUNTER_CLOCKWISE));
+                        if rollback.on_hover_text("Убрать наш пак и вернуть озвучку Valve").clicked() {
                             self.build.confirm = Some(GameAction::Rollback);
                             self.build.game_result = None;
                             self.build.dota_running = install::is_dota_running();
@@ -371,14 +371,14 @@ impl App {
                                     if ui.add(theme::primary(label)).clicked() {
                                         self.start_game_action(ctx, action);
                                     }
-                                    if ui.add(theme::ghost("Отмена")).clicked() {
+                                    if theme::ghost(ui, true, "Отмена").clicked() {
                                         self.build.confirm = None;
                                     }
                                 });
                             }
                             Err(e) => {
                                 ui.label(RichText::new(format!("{e:#}")).size(12.0).color(RED));
-                                if ui.add(theme::ghost("Закрыть")).clicked() {
+                                if theme::ghost(ui, true, "Закрыть").clicked() {
                                     self.build.confirm = None;
                                 }
                             }
