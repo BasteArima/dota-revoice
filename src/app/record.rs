@@ -283,6 +283,8 @@ impl App {
         ui.add_space(4.0);
         centered(ui, "new_take_settings", |ui| {
             egui::Frame::default().fill(theme::PANEL).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(12).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                // Высоту строки задаём до первой подписи — иначе она прилипает к верху.
+                ui.set_min_height(30.0);
                 ui.label(RichText::new("Новая запись:").size(13.0).color(MUTED));
                 let mut changed = false;
                 for (value, text) in [
