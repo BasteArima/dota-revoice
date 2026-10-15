@@ -1,3 +1,14 @@
+<p align="center">
+  <img src="docs/banner.png" alt="Dota Revoice — переозвучка героев Dota 2" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/BasteArima/dota-revoice/actions/workflows/ci.yml"><img src="https://github.com/BasteArima/dota-revoice/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/BasteArima/dota-revoice/releases/latest"><img src="https://img.shields.io/github/v/release/BasteArima/dota-revoice?include_prereleases&label=релиз" alt="Последний релиз"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/BasteArima/dota-revoice?label=лицензия" alt="Лицензия GPL-3.0"></a>
+  <img src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-1f2530" alt="Windows · macOS · Linux">
+</p>
+
 # Dota Revoice
 
 Программа для любительской переозвучки героев Dota 2. Слушаешь оригинальную
@@ -11,6 +22,12 @@
   шумодав, тон голоса, дубли — всё без потерь, исходник не меняется;
 - сборка пака, установка в игру, откат и запуск Доты — в три шага;
 - обмен фразами с друзьями одним zip-файлом.
+
+## Как это выглядит
+
+![Запись: оригинал и моя версия с обрезкой, громкостью и тоном](docs/screenshots/record.png)
+
+![Сборка и установка: три шага и обмен с друзьями](docs/screenshots/build.png)
 
 > Фанатский проект, не связан с Valve. Программа меняет только файлы в папке
 > языка озвучки (`game/dota_russian` и т.п.) и всё умеет откатывать.
