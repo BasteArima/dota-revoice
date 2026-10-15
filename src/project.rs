@@ -11,7 +11,7 @@
 //! example/export/dota_revoice.json                          ← пометки «переделать»
 //! ```
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,7 +40,11 @@ pub enum Status {
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     /// Пути ресурсов (`sounds/vo/hero/name`), помеченные «переделать».
+    #[serde(default)]
     redo: BTreeSet<String>,
+    /// Обрезка: какой кусок исходного wav идёт в игру, секунды [начало, конец].
+    #[serde(default)]
+    trims: BTreeMap<String, [f32; 2]>,
 }
 
 pub struct Project {
@@ -132,10 +136,26 @@ impl Project {
     pub fn set_redo(&mut self, line: &Line, redo: bool) -> Result<()> {
         let key = self.resource_path(line);
         let changed = if redo { self.state.redo.insert(key) } else { self.state.redo.remove(&key) };
-        if changed {
-            std::fs::create_dir_all(&self.export_root)?;
-            std::fs::write(self.export_root.join(STATE_FILE), serde_json::to_vec_pretty(&self.state)?)?;
-        }
+        if changed { self.save_state() } else { Ok(()) }
+    }
+
+    /// Обрезка фразы в секундах; `None` — фраза целиком.
+    pub fn trim(&self, line: &Line) -> Option<(f32, f32)> {
+        self.state.trims.get(&self.resource_path(line)).map(|&[a, b]| (a, b))
+    }
+
+    pub fn set_trim(&mut self, line: &Line, trim: Option<(f32, f32)>) -> Result<()> {
+        let key = self.resource_path(line);
+        let changed = match trim {
+            Some((a, b)) => self.state.trims.insert(key, [a, b]) != Some([a, b]),
+            None => self.state.trims.remove(&key).is_some(),
+        };
+        if changed { self.save_state() } else { Ok(()) }
+    }
+
+    fn save_state(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.export_root)?;
+        std::fs::write(self.export_root.join(STATE_FILE), serde_json::to_vec_pretty(&self.state)?)?;
         Ok(())
     }
 
@@ -152,6 +172,7 @@ impl Project {
             }
         }
         self.recorded.remove(&line.name);
+        self.set_trim(line, None)?;
         self.set_redo(line, false)
     }
 }

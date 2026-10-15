@@ -75,6 +75,42 @@ pub fn compute_peaks(samples: &[f32], bins: usize) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// Границы голоса в записи (в сэмплах): отрезаем тишину и шум по краям.
+/// Порог — на 26 dB ниже самого громкого места, но не ниже шума комнаты +10 dB.
+pub fn detect_voice(samples: &[f32]) -> Option<(usize, usize)> {
+    const WINDOW: usize = RATE as usize / 100; // 10 мс
+    const PAD_BEFORE: usize = 5; // 50 мс запаса до начала
+    const PAD_AFTER: usize = 12; // 120 мс после — не съесть хвост слова
+    let rms: Vec<f32> = samples
+        .chunks(WINDOW)
+        .map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len() as f32).sqrt())
+        .collect();
+    let peak = rms.iter().copied().fold(0f32, f32::max);
+    if peak <= 0.0 {
+        return None;
+    }
+    let mut sorted = rms.clone();
+    sorted.sort_by(f32::total_cmp);
+    let floor = sorted[sorted.len() / 10];
+    let threshold = (peak * 0.05).max(floor * 3.16).max(0.003);
+    let first = rms.iter().position(|&r| r > threshold)?;
+    let last = rms.iter().rposition(|&r| r > threshold)?;
+    let start = first.saturating_sub(PAD_BEFORE) * WINDOW;
+    let end = ((last + 1 + PAD_AFTER) * WINDOW).min(samples.len());
+    (end > start).then_some((start, end))
+}
+
+/// Короткое нарастание и затухание по краям, чтобы на срезе не щёлкало.
+pub fn fade_edges(samples: &mut [f32]) {
+    let n = (RATE as usize / 200).min(samples.len() / 2); // 5 мс
+    let len = samples.len();
+    for i in 0..n {
+        let k = i as f32 / n as f32;
+        samples[i] *= k;
+        samples[len - 1 - i] *= k;
+    }
+}
+
 /// Читает mp3/wav/ogg/flac/m4a и приводит к моно 44100 Гц.
 pub fn decode_file(path: &Path) -> Result<Vec<f32>> {
     let file = File::open(path).with_context(|| format!("не открывается {}", path.display()))?;
@@ -384,6 +420,21 @@ mod tests {
             .map(|i| (out[i] - (i as f32 * 440.0 * std::f32::consts::TAU / 44100.0).sin() * 0.5).abs())
             .fold(0f32, f32::max);
         assert!(max_err < 0.02, "ошибка {max_err}");
+    }
+
+    #[test]
+    fn finds_voice_between_silences() {
+        // 0.5 с тихого шума, 1 с «голоса», 0.5 с шума.
+        let mut s = Vec::new();
+        let noise = |i: usize| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.002;
+        s.extend((0..22050).map(noise));
+        s.extend((0..44100).map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 44100.0).sin() * 0.4));
+        s.extend((0..22050).map(noise));
+        let (start, end) = detect_voice(&s).unwrap();
+        let (a, b) = (start as f32 / 44100.0, end as f32 / 44100.0);
+        assert!((0.43..=0.5).contains(&a), "начало {a}");
+        assert!((1.5..=1.64).contains(&b), "конец {b}");
+        assert_eq!(detect_voice(&[0.0; 4410]), None);
     }
 
     #[test]

@@ -1,13 +1,22 @@
-//! Настройки программы между запусками: последняя папка и микрофон.
+//! Настройки программы между запусками: последняя папка, микрофон, автообрезка.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub last_folder: Option<PathBuf>,
     pub input_device: Option<String>,
+    /// Сразу после записи или импорта обрезать тишину по краям.
+    pub auto_trim: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { last_folder: None, input_device: None, auto_trim: true }
+    }
 }
 
 fn path() -> Option<PathBuf> {

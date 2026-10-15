@@ -8,13 +8,16 @@ use std::time::Duration;
 use dota_revoice::audio::{self, Clip, Player, Recorder, Track};
 use dota_revoice::game::{self, DotaInstall};
 use dota_revoice::project::{self, Line, Project, Status};
-use dota_revoice::{encode, pack};
-use eframe::egui::{self, Align, Align2, Color32, FontId, Key, Modifiers, RichText, Sense, Stroke, pos2, vec2};
+use dota_revoice::{encode, install, pack};
+use eframe::egui::{self, Align, Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::config::Config;
 
 const MIN_TAKE_SECS: f32 = 0.2;
 const COMPARE_GAP_SECS: f32 = 0.4;
+const WAVE_HEIGHT: f32 = 90.0;
+/// Минимальная длина обрезанной фразы.
+const MIN_TRIM_SAMPLES: usize = audio::RATE as usize / 10;
 
 const GREEN: Color32 = Color32::from_rgb(76, 175, 80);
 const AMBER: Color32 = Color32::from_rgb(230, 160, 40);
@@ -34,6 +37,26 @@ struct PackJob {
     out: PathBuf,
 }
 
+/// Действие с папкой игры, ждущее подтверждения.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GameAction {
+    Install,
+    Rollback,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Handle {
+    Start,
+    End,
+}
+
+/// Перетаскивание края обрезки: пока тянем, файл не пересохраняем.
+#[derive(Clone, Copy)]
+struct TrimDrag {
+    handle: Handle,
+    range: (usize, usize),
+}
+
 #[derive(Default)]
 struct PackDialog {
     open: bool,
@@ -42,6 +65,11 @@ struct PackDialog {
     result: Option<Result<(String, PathBuf), String>>,
     /// Сколько моих фраз в экспорте — считается при открытии окна.
     mine_count: usize,
+    confirm: Option<GameAction>,
+    /// Дота была запущена, когда открыли подтверждение.
+    dota_running: bool,
+    game_task: Option<mpsc::Receiver<Result<String, String>>>,
+    game_result: Option<Result<String, String>>,
 }
 
 pub struct App {
@@ -57,7 +85,13 @@ pub struct App {
     scroll_to_selected: u8,
 
     original: Option<Clip>,
+    /// Моя запись целиком (исходный wav) — её показываем на волне.
+    mine_raw: Option<Clip>,
+    /// Кусок `mine_raw`, который идёт в игру, в сэмплах.
+    trim: (usize, usize),
+    /// Обрезанная версия — её играем и сравниваем.
     mine: Option<Clip>,
+    drag: Option<TrimDrag>,
     player: Option<Player>,
     recorder: Option<Recorder>,
     input_devices: Vec<String>,
@@ -80,7 +114,10 @@ impl App {
             search: String::new(),
             scroll_to_selected: 0,
             original: None,
+            mine_raw: None,
+            trim: (0, 0),
             mine: None,
+            drag: None,
             player: None,
             recorder: None,
             input_devices: Recorder::input_device_names(),
@@ -166,6 +203,8 @@ impl App {
         self.clipped = false;
         self.original = None;
         self.mine = None;
+        self.mine_raw = None;
+        self.drag = None;
         let Some(line) = self.current_line() else { return };
         match audio::decode_file(&line.original) {
             Ok(s) => self.original = Some(Clip::new(s)),
@@ -174,15 +213,82 @@ impl App {
         self.reload_mine(&line);
     }
 
+    /// Загружает мою запись: исходный wav (если есть) и сохранённую обрезку.
     fn reload_mine(&mut self, line: &Line) {
-        let Some(p) = &self.project else { return };
-        let path = p.export_mp3(line);
         self.mine = None;
-        if path.is_file() {
-            match audio::decode_file(&path) {
-                Ok(s) => self.mine = Some(Clip::new(s)),
-                Err(e) => self.error(format!("Моя версия не читается: {e:#}")),
+        self.mine_raw = None;
+        self.drag = None;
+        let Some(p) = &self.project else { return };
+        let (mp3, raw) = (p.export_mp3(line), p.raw_wav(line));
+        if !mp3.is_file() {
+            return;
+        }
+        // Без wav (например, файл положили руками) обрезка от mp3 не имеет смысла.
+        let (source, trim) = if raw.is_file() { (raw, p.trim(line)) } else { (mp3, None) };
+        match audio::decode_file(&source) {
+            Ok(samples) => {
+                let len = samples.len();
+                let range = trim
+                    .map(|(a, b)| (secs_to_index(a, len), secs_to_index(b, len)))
+                    .filter(|(a, b)| b > a)
+                    .unwrap_or((0, len));
+                self.mine_raw = Some(Clip::new(samples));
+                self.set_mine_slice(range);
             }
+            Err(e) => self.error(format!("Моя версия не читается: {e:#}")),
+        }
+    }
+
+    /// Пересчитывает обрезанную версию из исходника (без записи на диск).
+    fn set_mine_slice(&mut self, range: (usize, usize)) {
+        let Some(raw) = &self.mine_raw else { return };
+        let len = raw.samples.len();
+        self.trim = (range.0.min(len), range.1.min(len));
+        let mut part = raw.samples[self.trim.0..self.trim.1].to_vec();
+        if self.trim != (0, len) {
+            audio::fade_edges(&mut part);
+        }
+        self.mine = Some(Clip::new(part));
+    }
+
+    /// Применяет обрезку: запоминает границы и перезаписывает mp3 для игры.
+    fn apply_trim(&mut self, range: (usize, usize)) -> anyhow::Result<()> {
+        let (Some(line), Some(raw)) = (self.current_line(), self.mine_raw.clone()) else { return Ok(()) };
+        if let Some(pl) = &self.player {
+            pl.stop();
+        }
+        self.set_mine_slice(range);
+        let len = raw.samples.len();
+        let Some(p) = self.project.as_mut() else { return Ok(()) };
+        let raw_path = p.raw_wav(&line);
+        if !raw_path.is_file() {
+            encode::save_raw(&raw_path, &raw.samples)?;
+        }
+        let full = self.trim == (0, len);
+        p.set_trim(&line, (!full).then(|| (index_to_secs(self.trim.0), index_to_secs(self.trim.1))))?;
+        let mine = self.mine.as_ref().map(|c| c.samples.clone()).unwrap_or_default();
+        encode::write_mp3(&p.export_mp3(&line), &mine)
+    }
+
+    fn trim_silence(&mut self) {
+        let Some(raw) = &self.mine_raw else { return };
+        let len = raw.samples.len();
+        let Some(range) = audio::detect_voice(&raw.samples) else {
+            self.error("Не нашёл голос в записи — слишком тихо?");
+            return;
+        };
+        match self.apply_trim(range) {
+            Ok(()) if range == (0, len) => self.info("Тишины по краям нет — обрезать нечего"),
+            Ok(()) => self.info(format!("Тишина обрезана: {:.2}–{:.2} с", index_to_secs(range.0), index_to_secs(range.1))),
+            Err(e) => self.error(format!("Обрезка не сохранилась: {e:#}")),
+        }
+    }
+
+    fn reset_trim(&mut self) {
+        let Some(len) = self.mine_raw.as_ref().map(|r| r.samples.len()) else { return };
+        match self.apply_trim((0, len)) {
+            Ok(()) => self.info("Обрезка снята — в игру пойдёт запись целиком"),
+            Err(e) => self.error(format!("{e:#}")),
         }
     }
 
@@ -290,12 +396,24 @@ impl App {
         }
         let (Some(line), Some(p)) = (self.current_line(), self.project.as_mut()) else { return };
         let mp3 = p.export_mp3(&line);
-        let result = encode::save_take(&mp3, &p.raw_wav(&line), &samples).and_then(|_| p.mark_recorded(&line));
+        if let Err(e) = encode::save_raw(&p.raw_wav(&line), &samples) {
+            self.error(format!("Не сохранилось: {e:#}"));
+            return;
+        }
+        let len = samples.len();
+        let range = if self.config.auto_trim { audio::detect_voice(&samples).unwrap_or((0, len)) } else { (0, len) };
+        self.mine_raw = Some(Clip::new(samples));
+        let result = self.apply_trim(range).and_then(|_| match self.project.as_mut() {
+            Some(p) => p.mark_recorded(&line),
+            None => Ok(()),
+        });
         match result {
-            Ok(()) => {
-                self.info(format!("{verb}: {} ({secs:.1} с)", mp3.display()));
-                self.reload_mine(&line);
-            }
+            Ok(()) if range != (0, len) => self.info(format!(
+                "{verb}: {} — тишина обрезана, {:.1} из {secs:.1} с",
+                mp3.display(),
+                index_to_secs(range.1 - range.0)
+            )),
+            Ok(()) => self.info(format!("{verb}: {} ({secs:.1} с)", mp3.display())),
             Err(e) => self.error(format!("Не сохранилось: {e:#}")),
         }
     }
@@ -312,6 +430,7 @@ impl App {
         match p.trash(&line) {
             Ok(()) => {
                 self.mine = None;
+                self.mine_raw = None;
                 self.info(format!("{} перенесена в корзину: {}", line.name, trash_dir.display()));
             }
             Err(e) => self.error(format!("{e:#}")),
@@ -344,6 +463,9 @@ impl App {
         }
         if pressed(Key::N) {
             self.next_unrecorded();
+        }
+        if pressed(Key::T) {
+            self.trim_silence();
         }
         if pressed(Key::Delete) {
             self.trash_current();
@@ -534,7 +656,7 @@ impl App {
         let live = recording.then(|| self.recorder.as_ref().map(|r| r.live_peaks(1024))).flatten();
         let mine_secs = match &live {
             Some((_, secs)) => *secs,
-            None => self.mine.as_ref().map_or(0.0, |c| c.duration_secs()),
+            None => self.mine_raw.as_ref().map_or(0.0, |c| c.duration_secs()),
         };
         let timeline = orig_secs.max(mine_secs).max(0.1);
         let head = |t: Track| now.filter(|(nt, _)| *nt == t).map(|(_, f)| f);
@@ -582,17 +704,40 @@ impl App {
                         };
                         ui.colored_label(color, hint);
                         ui.weak(format!("{:.1} с · громкость {:.1} dB ·", m.duration_secs(), m.rms_db()));
+                        if let Some(raw) = &self.mine_raw
+                            && m.samples.len() < raw.samples.len()
+                        {
+                            ui.weak(format!("✂ из {:.1} с ·", raw.duration_secs()));
+                        }
                     }
                 });
             });
             let resp = match &live {
                 Some((peaks, _)) => waveform(ui, Some(peaks), mine_secs / timeline, None, RED, ""),
-                None => waveform(ui, self.mine.as_ref().map(|c| c.peaks.as_slice()), mine_secs / timeline, head(Track::Mine), MINE_WAVE, "Нажми R, чтобы записать"),
+                None => self.trim_wave(ui, mine_secs / timeline, head(Track::Mine)),
             };
             if resp.clicked() && !recording {
                 self.toggle_play(Track::Mine);
             }
             self.level_meter(ui);
+
+            ui.horizontal(|ui| {
+                let can_trim = self.mine_raw.is_some() && !recording;
+                if ui.add_enabled(can_trim, egui::Button::new("✂ Обрезать тишину").shortcut_text("T")).clicked() {
+                    self.trim_silence();
+                }
+                let trimmed = self.mine_raw.as_ref().is_some_and(|r| self.trim != (0, r.samples.len()));
+                if ui.add_enabled(can_trim && trimmed, egui::Button::new("Без обрезки")).clicked() {
+                    self.reset_trim();
+                }
+                if ui.add(egui::SelectableLabel::new(self.config.auto_trim, "Автообрезка после записи")).clicked() {
+                    self.config.auto_trim = !self.config.auto_trim;
+                    self.config.save();
+                }
+                if self.mine_raw.is_some() {
+                    ui.label(RichText::new("края волны можно тянуть мышкой").small().weak());
+                }
+            });
 
             ui.horizontal(|ui| {
                 let rec_btn = if recording {
@@ -644,6 +789,76 @@ impl App {
         });
         ui.add_space(8.0);
         ui.label(RichText::new("Esc — отменить запись или остановить звук. Клик по волне — тоже воспроизведение.").small().weak());
+    }
+
+    /// Волна моей записи целиком: затемнённые края — обрезано, синие ручки можно тянуть.
+    fn trim_wave(&mut self, ui: &mut egui::Ui, span: f32, playhead: Option<f32>) -> egui::Response {
+        let Some(raw) = self.mine_raw.clone() else {
+            return waveform(ui, None, span, None, MINE_WAVE, "Нажми R, чтобы записать");
+        };
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), WAVE_HEIGHT), Sense::click_and_drag());
+        let inner = paint_wave(ui, rect, Some(&raw.peaks), span, MINE_WAVE, "");
+        let len = raw.samples.len().max(1);
+        let width = (inner.width() * span.clamp(0.0, 1.0)).max(1.0);
+        let to_x = |i: usize| inner.left() + width * i as f32 / len as f32;
+        let to_index = |x: f32| (((x - inner.left()) / width).clamp(0.0, 1.0) * len as f32) as usize;
+        let (s, e) = self.drag.map_or(self.trim, |d| d.range);
+
+        let p = ui.painter_at(rect);
+        let shade = Color32::from_black_alpha(150);
+        p.rect_filled(Rect::from_min_max(inner.left_top(), pos2(to_x(s), inner.bottom())), 0.0, shade);
+        p.rect_filled(Rect::from_min_max(pos2(to_x(e), inner.top()), pos2(inner.left() + width, inner.bottom())), 0.0, shade);
+        for x in [to_x(s), to_x(e)] {
+            p.line_segment([pos2(x, rect.top() + 2.0), pos2(x, rect.bottom() - 2.0)], Stroke::new(2.0_f32, ACCENT));
+            for y in [rect.top() + 9.0, rect.bottom() - 9.0] {
+                p.rect_filled(Rect::from_center_size(pos2(x, y), vec2(8.0, 12.0)), 2.0, ACCENT);
+            }
+        }
+        if let Some(f) = playhead {
+            let x = to_x(s + ((e - s) as f32 * f.clamp(0.0, 1.0)) as usize);
+            p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.5_f32, ui.visuals().strong_text_color()));
+        }
+
+        let near = |pos: Pos2| {
+            let (ds, de) = ((pos.x - to_x(s)).abs(), (pos.x - to_x(e)).abs());
+            if ds.min(de) > 8.0 {
+                None
+            } else if ds <= de {
+                Some(Handle::Start)
+            } else {
+                Some(Handle::End)
+            }
+        };
+        if resp.hover_pos().is_some_and(|pos| near(pos).is_some()) || self.drag.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        } else if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        // Ручку ищем по точке нажатия: к моменту, когда egui признаёт перетаскивание,
+        // курсор уже успевает отъехать от ручки.
+        if resp.drag_started()
+            && let Some(handle) = ui.input(|i| i.pointer.press_origin()).and_then(near)
+        {
+            self.drag = Some(TrimDrag { handle, range: (s, e) });
+        }
+        if let Some(d) = &mut self.drag
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            let i = to_index(pos.x);
+            match d.handle {
+                Handle::Start => d.range.0 = i.min(d.range.1.saturating_sub(MIN_TRIM_SAMPLES)),
+                Handle::End => d.range.1 = i.max(d.range.0 + MIN_TRIM_SAMPLES).min(len),
+            }
+        }
+        if resp.drag_stopped()
+            && let Some(d) = self.drag.take()
+        {
+            match self.apply_trim(d.range) {
+                Ok(()) => self.info(format!("Обрезка: {:.2}–{:.2} с", index_to_secs(d.range.0), index_to_secs(d.range.1))),
+                Err(e) => self.error(format!("Обрезка не сохранилась: {e:#}")),
+            }
+        }
+        resp
     }
 
     fn level_meter(&mut self, ui: &mut egui::Ui) {
@@ -700,6 +915,12 @@ impl App {
             });
             self.pack.job = None;
         }
+        if let Some(rx) = &self.pack.game_task
+            && let Ok(result) = rx.try_recv()
+        {
+            self.pack.game_result = Some(result);
+            self.pack.game_task = None;
+        }
         if !self.pack.open {
             return;
         }
@@ -707,6 +928,7 @@ impl App {
         let voice = self.dota.as_ref().and_then(|d| d.voice_pak());
         let out = p.export_root.join("build").join("pak02_dir.vpk");
         let mut start = false;
+        let mut game_action = None;
         let mut open = self.pack.open;
         egui::Window::new("Сборка пака").open(&mut open).collapsible(false).resizable(false).default_width(460.0).show(ctx, |ui| {
             let mine = self.pack.mine_count;
@@ -735,12 +957,6 @@ impl App {
                 Some(Ok((text, path))) => {
                     ui.add_space(6.0);
                     ui.colored_label(GREEN, text.as_str());
-                    if let Some(dir) = self.dota.as_ref().and_then(|d| d.language_dir()) {
-                        ui.label(format!(
-                            "Установка пока вручную: скопируй pak02_dir.vpk в {} и переименуй там pak01_dir.vpk в pak01_dir.vpk.off. Перезапусти Доту.",
-                            dir.display()
-                        ));
-                    }
                     if ui.button("Показать в папке").clicked() {
                         reveal(path);
                     }
@@ -750,8 +966,45 @@ impl App {
                 }
                 None => {}
             }
+
+            if let Some(dota) = &self.dota {
+                ui.add_space(8.0);
+                ui.separator();
+                game_action = game_section(ui, &mut self.pack, dota, &out);
+            }
         });
         self.pack.open = open;
+        if !open {
+            self.pack.confirm = None;
+        }
+
+        match game_action {
+            Some(GameUi::Ask(action)) => {
+                self.pack.confirm = Some(action);
+                self.pack.game_result = None;
+                self.pack.dota_running = install::is_dota_running();
+            }
+            Some(GameUi::Cancel) => self.pack.confirm = None,
+            Some(GameUi::Run(action)) => {
+                self.pack.confirm = None;
+                if let Some(dota) = self.dota.clone() {
+                    let (tx, rx) = mpsc::channel();
+                    let (built, ctx2) = (out.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        let result = match action {
+                            GameAction::Install => install::Plan::for_install(&dota)
+                                .and_then(|plan| install::install(&plan, &built))
+                                .map(|()| "Установлено. Перезапусти Доту — новые фразы подхватятся при запуске.".to_owned()),
+                            GameAction::Rollback => install::rollback(&dota).map(|done| done.join(". ")),
+                        };
+                        let _ = tx.send(result.map_err(|e| format!("{e:#}")));
+                        ctx2.request_repaint();
+                    });
+                    self.pack.game_task = Some(rx);
+                }
+            }
+            None => {}
+        }
 
         if start {
             let base = voice.filter(|_| self.pack.use_base).map(|v| v.path);
@@ -798,7 +1051,8 @@ impl eframe::App for App {
         // Анимация волны и индикатора уровня; в покое — редкая перерисовка.
         let busy = self.player.as_ref().is_some_and(|p| p.now_playing().is_some())
             || self.recorder.as_ref().is_some_and(|r| r.is_recording())
-            || self.pack.job.is_some();
+            || self.pack.job.is_some()
+            || self.pack.game_task.is_some();
         ctx.request_repaint_after(if busy { Duration::from_millis(16) } else { Duration::from_millis(60) });
     }
 
@@ -881,7 +1135,92 @@ fn list_row(ui: &mut egui::Ui, text: &str, status: Status, selected: bool) -> eg
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Рисует волну по огибающей на доле `span` ширины (общая шкала времени).
+/// Ответ блока «Игра» в окне сборки.
+enum GameUi {
+    Ask(GameAction),
+    Run(GameAction),
+    Cancel,
+}
+
+/// Установка в игру и откат — с подтверждением, где перечислено, что изменится.
+fn game_section(ui: &mut egui::Ui, pack: &mut PackDialog, dota: &DotaInstall, built: &Path) -> Option<GameUi> {
+    let mut action = None;
+    ui.label(RichText::new("Игра").strong());
+    if pack.game_task.is_some() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Меняю файлы игры…");
+        });
+        return None;
+    }
+    match pack.confirm {
+        None => {
+            ui.horizontal(|ui| {
+                let install_btn = egui::Button::new(RichText::new("Установить в игру").color(Color32::WHITE)).fill(ACCENT);
+                if ui.add_enabled(built.is_file(), install_btn).on_disabled_hover_text("Сначала собери пак").clicked() {
+                    action = Some(GameUi::Ask(GameAction::Install));
+                }
+                if ui.add_enabled(install::has_changes(dota), egui::Button::new("Откатить")).clicked() {
+                    action = Some(GameUi::Ask(GameAction::Rollback));
+                }
+            });
+        }
+        Some(what) => {
+            let steps = match what {
+                GameAction::Install => install::Plan::for_install(dota).map(|p| p.describe()),
+                GameAction::Rollback => Ok(vec![
+                    format!("Удалить {} из папки языка", install::PAK_NAME),
+                    "Вернуть pak01_dir.vpk (озвучку Valve), если он отключён".to_owned(),
+                ]),
+            };
+            match steps {
+                Ok(steps) => {
+                    ui.label("Будет сделано:");
+                    for step in steps {
+                        ui.label(format!("• {step}"));
+                    }
+                    if pack.dota_running {
+                        ui.colored_label(RED, "Дота запущена — закрой её, иначе файлы заняты");
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(RichText::new("Подтвердить").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                            action = Some(GameUi::Run(what));
+                        }
+                        if ui.button("Отмена").clicked() {
+                            action = Some(GameUi::Cancel);
+                        }
+                    });
+                }
+                Err(e) => {
+                    ui.colored_label(RED, format!("{e:#}"));
+                    if ui.button("Закрыть").clicked() {
+                        action = Some(GameUi::Cancel);
+                    }
+                }
+            }
+        }
+    }
+    match &pack.game_result {
+        Some(Ok(text)) => {
+            ui.colored_label(GREEN, text.as_str());
+        }
+        Some(Err(text)) => {
+            ui.colored_label(RED, text.as_str());
+        }
+        None => {}
+    }
+    action
+}
+
+fn secs_to_index(secs: f32, len: usize) -> usize {
+    ((secs.max(0.0) * audio::RATE as f32) as usize).min(len)
+}
+
+fn index_to_secs(index: usize) -> f32 {
+    index as f32 / audio::RATE as f32
+}
+
+/// Волна с бегунком; клик по ней — воспроизведение.
 fn waveform(
     ui: &mut egui::Ui,
     peaks: Option<&[(f32, f32)]>,
@@ -890,7 +1229,18 @@ fn waveform(
     color: Color32,
     empty: &str,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 90.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), WAVE_HEIGHT), Sense::click());
+    let inner = paint_wave(ui, rect, peaks, span, color, empty);
+    if let Some(f) = playhead {
+        let x = inner.left() + inner.width() * span.clamp(0.0, 1.0) * f.clamp(0.0, 1.0);
+        ui.painter_at(rect)
+            .line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.5_f32, ui.visuals().strong_text_color()));
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Рисует огибающую на доле `span` ширины (общая шкала времени); возвращает поле рисования.
+fn paint_wave(ui: &egui::Ui, rect: Rect, peaks: Option<&[(f32, f32)]>, span: f32, color: Color32, empty: &str) -> Rect {
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
     let inner = rect.shrink2(vec2(6.0, 6.0));
@@ -913,11 +1263,7 @@ fn waveform(
             p.text(rect.center(), Align2::CENTER_CENTER, empty, FontId::proportional(13.0), ui.visuals().weak_text_color());
         }
     }
-    if let Some(f) = playhead {
-        let x = inner.left() + width * f.clamp(0.0, 1.0);
-        p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.5_f32, ui.visuals().strong_text_color()));
-    }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    inner
 }
 
 fn status_color(ui: &egui::Ui, status: Status) -> Color32 {

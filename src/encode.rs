@@ -35,16 +35,26 @@ pub fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
     Ok(())
 }
 
-/// Пишет фразу в оба места, создавая папки.
-pub fn save_take(mp3_path: &Path, wav_path: &Path, samples: &[f32]) -> Result<()> {
-    for p in [mp3_path, wav_path] {
-        if let Some(dir) = p.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+/// mp3 для игры, с созданием папок.
+pub fn write_mp3(path: &Path, samples: &[f32]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
     }
-    let mp3 = encode_mp3(samples)?;
-    std::fs::write(mp3_path, mp3).with_context(|| format!("не записался {}", mp3_path.display()))?;
-    write_wav(wav_path, samples)
+    std::fs::write(path, encode_mp3(samples)?).with_context(|| format!("не записался {}", path.display()))
+}
+
+/// Исходник без потерь, с созданием папок.
+pub fn save_raw(path: &Path, samples: &[f32]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    write_wav(path, samples)
+}
+
+/// Пишет фразу целиком в оба места.
+pub fn save_take(mp3_path: &Path, wav_path: &Path, samples: &[f32]) -> Result<()> {
+    save_raw(wav_path, samples)?;
+    write_mp3(mp3_path, samples)
 }
 
 #[cfg(test)]
