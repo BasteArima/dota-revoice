@@ -1,6 +1,6 @@
 //! Настройки программы между запусками: папки, язык озвучки, микрофон, автообрезка.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -129,7 +129,7 @@ impl Config {
 /// куда писать нельзя, поэтому там и на Linux — «Документы».
 pub fn default_library() -> PathBuf {
     #[cfg(windows)]
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf))
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(std::path::Path::to_path_buf))
         && writable(&dir)
     {
         return dir.join("library");
@@ -139,7 +139,8 @@ pub fn default_library() -> PathBuf {
 }
 
 /// Можно ли создать файл в папке.
-pub fn writable(dir: &Path) -> bool {
+#[cfg(windows)]
+fn writable(dir: &std::path::Path) -> bool {
     let probe = dir.join(format!(".dota_revoice_probe_{}", std::process::id()));
     let ok = std::fs::write(&probe, b"").is_ok();
     let _ = std::fs::remove_file(&probe);
