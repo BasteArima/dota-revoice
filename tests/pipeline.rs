@@ -48,10 +48,15 @@ fn record_trash_and_pack() {
     assert!(root.join("export/sounds/vo/testhero/test_kill_01.mp3").is_file());
     assert!(root.join("export/.raw/sounds/vo/testhero/test_kill_01.wav").is_file());
 
-    // Пометка «переделать» переживает переоткрытие проекта.
+    // Пометка «переделать», обрезка и заметка переживают переоткрытие проекта.
     p.set_redo(&kill, true).unwrap();
+    p.set_trim(&kill, Some((0.1, 1.0))).unwrap();
+    p.set_note(&kill, "  убийство героя ").unwrap();
     let p2 = Project::open(&hero).unwrap();
     assert_eq!(p2.status(&p2.lines[0]), Status::Redo);
+    assert_eq!(p2.trim(&p2.lines[0]), Some((0.1, 1.0)));
+    assert_eq!(p2.note(&p2.lines[0]), "убийство героя");
+    assert_eq!(p2.note(&p2.lines[1]), "");
     assert_eq!(p2.recorded_count(), 1);
 
     // Базовый пак «Valve» с обеими фразами — наша заменяет одну, вторая копируется.

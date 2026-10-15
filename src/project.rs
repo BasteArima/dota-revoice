@@ -45,6 +45,9 @@ struct State {
     /// Обрезка: какой кусок исходного wav идёт в игру, секунды [начало, конец].
     #[serde(default)]
     trims: BTreeMap<String, [f32; 2]>,
+    /// Заметки пользователя к фразам: «покупка BKB» и т.п.
+    #[serde(default)]
+    notes: BTreeMap<String, String>,
 }
 
 pub struct Project {
@@ -149,6 +152,22 @@ impl Project {
         let changed = match trim {
             Some((a, b)) => self.state.trims.insert(key, [a, b]) != Some([a, b]),
             None => self.state.trims.remove(&key).is_some(),
+        };
+        if changed { self.save_state() } else { Ok(()) }
+    }
+
+    pub fn note(&self, line: &Line) -> &str {
+        self.state.notes.get(&self.resource_path(line)).map_or("", String::as_str)
+    }
+
+    /// Пустая заметка удаляется.
+    pub fn set_note(&mut self, line: &Line, note: &str) -> Result<()> {
+        let key = self.resource_path(line);
+        let note = note.trim();
+        let changed = if note.is_empty() {
+            self.state.notes.remove(&key).is_some()
+        } else {
+            self.state.notes.insert(key, note.to_owned()).as_deref() != Some(note)
         };
         if changed { self.save_state() } else { Ok(()) }
     }
