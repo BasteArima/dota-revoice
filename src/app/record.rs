@@ -281,7 +281,7 @@ impl App {
 
         // Настройки новой записи — общие для всех фраз, поэтому отдельной плашкой.
         ui.add_space(4.0);
-        centered(ui, 760.0, |ui| {
+        centered(ui, "new_take_settings", |ui| {
             egui::Frame::default().fill(theme::PANEL).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(12).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
                 ui.label(RichText::new("Новая запись:").size(13.0).color(MUTED));
                 let mut changed = false;
@@ -321,13 +321,12 @@ impl App {
         let main = vec2(150.0, 34.0);
         let extra = vec2(124.0, 34.0);
         let gap = 14.0;
-        let total = main.x * 2.0 + extra.x * 2.0 + 72.0 + gap * 4.0;
         let can_compare = self.mine.is_some() && self.original.is_some() && !recording;
         let can_play = self.mine.is_some() && !recording;
-        ui.horizontal(|ui| {
-            ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+        centered(ui, "transport", |ui| {
             // Высоту ряда задаём заранее, иначе первая кнопка прилипает к верху.
-            ui.allocate_ui_with_layout(vec2(total, 72.0), egui::Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_height(72.0);
+            {
                 ui.spacing_mut().item_spacing.x = gap;
                 let compare = egui::Button::new(format!("{}  Сравнить", icon::ARROWS_LEFT_RIGHT)).shortcut_text("C");
                 if ui.add_enabled_ui(can_compare, |ui| ui.add_sized(extra, compare)).inner.on_hover_text("Оригинал, а сразу за ним моя версия").clicked() {
@@ -348,7 +347,7 @@ impl App {
                 if ui.add_enabled_ui(!recording, |ui| ui.add_sized(extra, import)).inner.on_hover_text("mp3, wav, ogg, голосовые Telegram…").clicked() {
                     self.import_file();
                 }
-            });
+            }
         });
     }
 
@@ -593,11 +592,18 @@ enum TakeAction {
     Trash,
 }
 
-/// Ряд виджетов по центру доступной ширины (примерная ширина ряда — `width`).
-fn centered(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui)) {
+/// Ряд виджетов строго по центру: ширину ряда замеряем на прошлом кадре
+/// и храним в памяти egui под ключом `id` (первый кадр может быть чуть смещён).
+fn centered(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let key = egui::Id::new(("centered", id));
+    let width: f32 = ui.ctx().data(|d| d.get_temp(key)).unwrap_or(0.0);
     ui.horizontal(|ui| {
         ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-        add(ui);
+        let row = ui.horizontal(add).response.rect.width();
+        if (row - width).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(key, row));
+            ui.ctx().request_repaint();
+        }
     });
 }
 
