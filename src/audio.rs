@@ -115,8 +115,11 @@ pub fn fade_edges(samples: &mut [f32]) {
     }
 }
 
-/// Читает mp3/wav/ogg/flac/m4a и приводит к моно 44100 Гц.
+/// Читает mp3/wav/ogg/flac/m4a и голосовые (Ogg Opus), приводит к моно 44100 Гц.
 pub fn decode_file(path: &Path) -> Result<Vec<f32>> {
+    if crate::opus::is_ogg_opus(path) {
+        return crate::opus::decode_file(path);
+    }
     let file = File::open(path).with_context(|| format!("не открывается {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();

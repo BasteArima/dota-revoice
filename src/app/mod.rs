@@ -13,7 +13,7 @@ use dota_revoice::audio::{self, Clip, Player, Recorder, Track};
 use dota_revoice::encode;
 use dota_revoice::process::{self, Settings};
 use dota_revoice::game::{self, DotaInstall};
-use dota_revoice::project::{self, Line, Project, Status};
+use dota_revoice::project::{self, Line, Project, Status, Take};
 use eframe::egui::{self, Align, Key, Modifiers, RichText};
 
 use crate::config::{Config, PreRoll};
@@ -85,6 +85,8 @@ pub struct App {
     mine: Option<Clip>,
     drag: Option<TrimDrag>,
     pending: Option<Pending>,
+    /// Прежние дубли выбранной фразы.
+    takes: Vec<Take>,
     player: Option<Player>,
     recorder: Option<Recorder>,
     input_devices: Vec<String>,
@@ -117,6 +119,7 @@ impl App {
             mine: None,
             drag: None,
             pending: None,
+            takes: Vec::new(),
             player: None,
             recorder: None,
             input_devices: Recorder::input_device_names(),
@@ -230,6 +233,7 @@ impl App {
         self.mine_raw = None;
         self.drag = None;
         let Some(p) = &self.project else { return };
+        self.takes = p.takes(line);
         let (mp3, raw) = (p.export_mp3(line), p.raw_wav(line));
         if !mp3.is_file() {
             return;
@@ -323,20 +327,73 @@ impl App {
         }
     }
 
-    fn toggle_denoise(&mut self) {
+    /// Меняет обработку. Шумодав и тон влияют на громкость — если её подгоняли, подгоняем заново.
+    fn change_fx(&mut self, change: impl FnOnce(&mut Settings), done: &str) {
         if self.mine_raw.is_none() {
             return;
         }
-        let mut fx = Settings { denoise: !self.fx.denoise, ..self.fx };
-        // Шумодав меняет громкость — если её подгоняли, подгоняем заново.
+        let mut fx = self.fx;
+        change(&mut fx);
         let regain = fx.gain_db != 0.0;
         self.fx = fx;
         if regain && let Some(gain) = self.measure_gain() {
             fx.gain_db = gain;
         }
-        let text = if fx.denoise { "Шумодав включён" } else { "Шумодав выключен" };
         match self.apply_fx(fx) {
-            Ok(()) => self.info(text),
+            Ok(()) => self.info(done),
+            Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+
+    fn toggle_denoise(&mut self) {
+        let on = !self.fx.denoise;
+        self.change_fx(|fx| fx.denoise = on, if on { "Шумодав включён" } else { "Шумодав выключен" });
+    }
+
+    fn set_pitch(&mut self, semitones: f32) {
+        let semitones = semitones.clamp(-12.0, 12.0);
+        let text = if semitones == 0.0 { "Тон как в записи".to_owned() } else { format!("Тон: {semitones:+.0} полутона") };
+        self.change_fx(|fx| fx.pitch = semitones, &text);
+    }
+
+    /// Возвращает прежний дубль; текущий уходит в дубли.
+    fn restore_take(&mut self, id: u32) {
+        let (Some(line), Some(p)) = (self.current_line(), self.project.as_mut()) else { return };
+        let result = p.restore_take(&line, id);
+        if let Err(e) = result {
+            self.error(format!("Дубль не вернулся: {e:#}"));
+            return;
+        }
+        self.reload_mine(&line);
+        let saved = self.save_mine().and_then(|_| match self.project.as_mut() {
+            Some(p) => p.mark_recorded(&line),
+            None => Ok(()),
+        });
+        match saved {
+            Ok(()) => self.info(format!("Дубль №{id} снова в работе, прежняя версия — в дублях")),
+            Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+
+    fn trash_take(&mut self, id: u32) {
+        let (Some(line), Some(p)) = (self.current_line(), self.project.as_mut()) else { return };
+        match p.trash_take(&line, id) {
+            Ok(()) => {
+                self.takes = p.takes(&line);
+                self.info(format!("Дубль №{id} — в корзине"));
+            }
+            Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+
+    /// Прослушать прежний дубль как есть, без обработки.
+    fn play_take(&mut self, take: &Take) {
+        match audio::decode_file(&take.path) {
+            Ok(s) => {
+                if let Some(p) = &self.player {
+                    p.play(Track::Cue, Arc::new(s));
+                }
+            }
             Err(e) => self.error(format!("{e:#}")),
         }
     }
@@ -541,13 +598,15 @@ impl App {
         }
         let (Some(line), Some(p)) = (self.current_line(), self.project.as_mut()) else { return };
         let mp3 = p.export_mp3(&line);
-        if let Err(e) = encode::save_raw(&p.raw_wav(&line), &samples) {
+        let saved = p.archive_current(&line).and_then(|_| encode::save_raw(&p.raw_wav(&line), &samples));
+        self.takes = p.takes(&line);
+        if let Err(e) = saved {
             self.error(format!("Не сохранилось: {e:#}"));
             return;
         }
         let len = samples.len();
         self.mine_raw = Some(Arc::new(samples));
-        self.fx = Settings { denoise: self.config.denoise_new, gain_db: 0.0 };
+        self.fx = Settings { denoise: self.config.denoise_new, ..Settings::default() };
         self.trim = (0, len);
         self.render_full();
         // Тишину ищем уже после шумодава — так границы точнее.

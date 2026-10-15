@@ -5,6 +5,7 @@ pub mod encode;
 pub mod game;
 pub mod install;
 pub mod mp3;
+pub mod opus;
 pub mod pack;
 pub mod process;
 pub mod project;

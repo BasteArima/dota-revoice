@@ -5,6 +5,7 @@ use dota_revoice::project::{self, Status};
 use eframe::egui::{self, Align, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use super::theme::{self, AMBER, BG_DEEP, CARD_HOVER, FAINT, GOLD, GREEN, LINE, MUTED, ON_GOLD, RED, TEXT, WAVE, icon};
+use super::build::ago;
 use super::{App, Handle, MIN_TRIM_SAMPLES, Pending, TrimDrag, index_to_secs, prefix_of};
 use crate::config::PreRoll;
 
@@ -188,6 +189,9 @@ impl App {
         theme::card_with(ui, if recording { RED } else { LINE }, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Моя версия").size(12.0).color(TEXT));
+                if !self.takes.is_empty() && !recording {
+                    self.takes_menu(ui);
+                }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if recording {
                         ui.label(RichText::new(format!("●  запись {mine_secs:.1} с")).size(12.0).color(RED));
@@ -223,6 +227,9 @@ impl App {
                         if self.fx.denoise {
                             ui.label(theme::small("шумодав ·"));
                         }
+                        if self.fx.pitch != 0.0 {
+                            ui.label(theme::small(format!("тон {:+.0} ·", self.fx.pitch)));
+                        }
                     }
                 });
             });
@@ -238,6 +245,9 @@ impl App {
                 self.toggle_play(Track::Mine);
             }
             self.level_meter(ui);
+            if self.mine_raw.is_some() && !recording {
+                self.pitch_row(ui);
+            }
         });
         ui.add_space(16.0);
 
@@ -438,6 +448,64 @@ impl App {
         resp
     }
 
+    /// Тон голоса: по полутону вниз или вверх, длительность не меняется.
+    fn pitch_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(icon::MUSIC_NOTE).size(12.0).color(FAINT));
+            ui.label(RichText::new("Тон голоса").size(12.0).color(MUTED));
+            let pitch = self.fx.pitch;
+            let small_btn = |t: &str| egui::Button::new(RichText::new(t).size(12.0)).min_size(vec2(24.0, 22.0));
+            if ui.add_enabled(pitch > -12.0, small_btn(icon::MINUS)).on_hover_text("На полутон ниже").clicked() {
+                self.set_pitch(pitch - 1.0);
+            }
+            let value = if pitch == 0.0 { "0".to_owned() } else { format!("{pitch:+.0}") };
+            ui.label(RichText::new(value).size(12.0).color(if pitch == 0.0 { MUTED } else { GOLD }));
+            if ui.add_enabled(pitch < 12.0, small_btn(icon::PLUS)).on_hover_text("На полутон выше").clicked() {
+                self.set_pitch(pitch + 1.0);
+            }
+            if pitch != 0.0 && ui.add(theme::ghost("сбросить")).clicked() {
+                self.set_pitch(0.0);
+            }
+            ui.label(RichText::new("· ниже — грубее и массивнее, выше — мельче").size(11.0).color(FAINT));
+        });
+    }
+
+    /// Выпадающий список прежних дублей: послушать, вернуть, удалить.
+    fn takes_menu(&mut self, ui: &mut egui::Ui) {
+        let title = RichText::new(format!("{}  дубли: {}", icon::STACK, self.takes.len())).size(12.0).color(MUTED);
+        let mut action = None;
+        ui.menu_button(title, |ui| {
+            ui.set_min_width(280.0);
+            ui.label(theme::small("Прежние попытки этой фразы"));
+            for take in &self.takes {
+                ui.horizontal(|ui| {
+                    let when = take.saved.map(ago).unwrap_or_default();
+                    ui.label(RichText::new(format!("№{} · {:.1} с · {when}", take.id, take.secs)).size(12.0).color(TEXT));
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(egui::Button::new(icon::TRASH).frame(false)).on_hover_text("В корзину").clicked() {
+                            action = Some((take.clone(), TakeAction::Trash));
+                        }
+                        if ui.add(egui::Button::new(RichText::new("Вернуть").size(12.0))).on_hover_text("Сделать этот дубль текущим").clicked() {
+                            action = Some((take.clone(), TakeAction::Restore));
+                        }
+                        if ui.add(egui::Button::new(icon::PLAY).frame(false)).on_hover_text("Послушать как есть").clicked() {
+                            action = Some((take.clone(), TakeAction::Play));
+                        }
+                    });
+                });
+            }
+        });
+        match action {
+            Some((take, TakeAction::Play)) => self.play_take(&take),
+            Some((take, TakeAction::Restore)) => {
+                ui.close_menu();
+                self.restore_take(take.id);
+            }
+            Some((take, TakeAction::Trash)) => self.trash_take(take.id),
+            None => {}
+        }
+    }
+
     fn level_meter(&mut self, ui: &mut egui::Ui) {
         if let Some(r) = &self.recorder {
             let (peak, clipped) = r.take_level();
@@ -470,6 +538,12 @@ impl App {
             ui.label(RichText::new("Перегруз микрофона — отодвинься или убавь усиление и перезапиши").size(12.0).color(RED));
         }
     }
+}
+
+enum TakeAction {
+    Play,
+    Restore,
+    Trash,
 }
 
 /// Тихий переключатель-галочка. Возвращает, изменился ли.

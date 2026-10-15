@@ -58,10 +58,29 @@ fn record_trash_and_pack() {
     assert_eq!(p2.note(&p2.lines[0]), "убийство героя");
     assert_eq!(p2.note(&p2.lines[1]), "");
     let mut p2 = p2;
-    let fx = dota_revoice::process::Settings { denoise: true, gain_db: 3.5 };
+    let fx = dota_revoice::process::Settings { denoise: true, gain_db: 3.5, pitch: -2.0 };
     p2.set_processing(&kill, fx).unwrap();
     assert_eq!(Project::open(&hero).unwrap().processing(&kill), fx);
+
+    // Дубли: новая запись убирает прежнюю в дубли вместе с настройками.
+    p2.archive_current(&kill).unwrap();
+    encode::save_raw(&p2.raw_wav(&kill), &tone(0.5, 330.0)).unwrap();
+    p2.set_trim(&kill, None).unwrap();
+    p2.set_processing(&kill, Default::default()).unwrap();
+    let takes = p2.takes(&kill);
+    assert_eq!(takes.len(), 1);
+    assert!((takes[0].secs - 1.2).abs() < 0.01, "старый дубль длиной 1.2 с");
+    // Возвращаем старый: он снова текущий со своей обработкой, а новый ушёл в дубли.
+    p2.restore_take(&kill, takes[0].id).unwrap();
+    assert_eq!(p2.processing(&kill), fx);
+    assert_eq!(p2.trim(&kill), Some((0.1, 1.0)));
+    let takes = p2.takes(&kill);
+    assert_eq!(takes.len(), 1);
+    assert!((takes[0].secs - 0.5).abs() < 0.01, "в дублях теперь новая запись 0.5 с");
+    p2.trash_take(&kill, takes[0].id).unwrap();
+    assert!(p2.takes(&kill).is_empty());
     assert_eq!(p2.recorded_count(), 1);
+    let mut p = p2;
 
     // Базовый пак «Valve» с обеими фразами — наша заменяет одну, вторая копируется.
     let mut base = VpkBuilder::default();
@@ -88,7 +107,7 @@ fn record_trash_and_pack() {
     assert_eq!(p.status(&kill), Status::Empty);
     assert!(!p.export_mp3(&kill).exists());
     let trashed = std::fs::read_dir(root.join("export/.trash/sounds/vo/testhero")).unwrap().count();
-    assert_eq!(trashed, 2, "mp3 и wav");
+    assert_eq!(trashed, 4, "mp3 и wav фразы + wav и json удалённого дубля");
 
     std::fs::remove_dir_all(root).unwrap();
 }

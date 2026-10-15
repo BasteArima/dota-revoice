@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-pub const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "wav", "ogg", "flac", "m4a", "aac"];
+pub const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac"];
 const STATE_FILE: &str = "dota_revoice.json";
 
 #[derive(Debug, Clone)]
@@ -54,6 +54,25 @@ struct State {
     /// Фразы, к которым применён шумодав.
     #[serde(default)]
     denoise: BTreeSet<String>,
+    /// Сдвиг тона моей версии, полутоны.
+    #[serde(default)]
+    pitches: BTreeMap<String, f32>,
+}
+
+/// Прежний дубль фразы: исходник и то, как он был обрезан и обработан.
+#[derive(Debug, Clone)]
+pub struct Take {
+    pub id: u32,
+    pub path: PathBuf,
+    pub saved: Option<SystemTime>,
+    pub secs: f32,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct TakeMeta {
+    trim: Option<[f32; 2]>,
+    fx: crate::process::Settings,
 }
 
 pub struct Project {
@@ -168,18 +187,88 @@ impl Project {
         crate::process::Settings {
             denoise: self.state.denoise.contains(&key),
             gain_db: self.state.gains.get(&key).copied().unwrap_or(0.0),
+            pitch: self.state.pitches.get(&key).copied().unwrap_or(0.0),
         }
     }
 
     pub fn set_processing(&mut self, line: &Line, s: crate::process::Settings) -> Result<()> {
         let key = self.resource_path(line);
         let denoise_changed = if s.denoise { self.state.denoise.insert(key.clone()) } else { self.state.denoise.remove(&key) };
-        let gain_changed = if s.gain_db.abs() < 0.05 {
-            self.state.gains.remove(&key).is_some()
-        } else {
-            self.state.gains.insert(key, s.gain_db) != Some(s.gain_db)
+        let set = |map: &mut BTreeMap<String, f32>, v: f32| {
+            if v.abs() < 0.05 { map.remove(&key).is_some() } else { map.insert(key.clone(), v) != Some(v) }
         };
-        if denoise_changed || gain_changed { self.save_state() } else { Ok(()) }
+        let gain_changed = set(&mut self.state.gains, s.gain_db);
+        let pitch_changed = set(&mut self.state.pitches, s.pitch);
+        if denoise_changed || gain_changed || pitch_changed { self.save_state() } else { Ok(()) }
+    }
+
+    /// Папка прежних дублей фразы: `export/.takes/sounds/vo/hero/name/`.
+    fn takes_dir(&self, line: &Line) -> PathBuf {
+        self.export_root.join(".takes").join(&self.resource_dir).join(&line.name)
+    }
+
+    /// Прежние дубли, новые первыми.
+    pub fn takes(&self, line: &Line) -> Vec<Take> {
+        let Ok(entries) = std::fs::read_dir(self.takes_dir(line)) else { return Vec::new() };
+        let mut takes: Vec<Take> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter_map(|path| {
+                let id = path.extension().filter(|e| *e == "wav")?.to_str().and(path.file_stem()?.to_str()?.parse().ok())?;
+                let secs = hound::WavReader::open(&path).map(|r| r.duration() as f32 / r.spec().sample_rate as f32).unwrap_or(0.0);
+                let saved = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                Some(Take { id, path, saved, secs })
+            })
+            .collect();
+        takes.sort_by_key(|t| std::cmp::Reverse(t.id));
+        takes
+    }
+
+    /// Убирает текущий исходник в дубли (вместе с его обрезкой и обработкой).
+    pub fn archive_current(&mut self, line: &Line) -> Result<()> {
+        let raw = self.raw_wav(line);
+        if !raw.is_file() {
+            return Ok(());
+        }
+        let dir = self.takes_dir(line);
+        std::fs::create_dir_all(&dir)?;
+        let id = self.takes(line).first().map_or(1, |t| t.id + 1);
+        let meta = TakeMeta { trim: self.trim(line).map(|(a, b)| [a, b]), fx: self.processing(line) };
+        std::fs::write(dir.join(format!("{id:03}.json")), serde_json::to_vec_pretty(&meta)?)?;
+        std::fs::rename(&raw, dir.join(format!("{id:03}.wav"))).with_context(|| format!("не перенёсся в дубли {}", raw.display()))?;
+        Ok(())
+    }
+
+    /// Возвращает дубль `id` в работу, текущий исходник уходит в дубли.
+    /// mp3 для игры после этого нужно пересобрать.
+    pub fn restore_take(&mut self, line: &Line, id: u32) -> Result<()> {
+        let dir = self.takes_dir(line);
+        let (wav, json) = (dir.join(format!("{id:03}.wav")), dir.join(format!("{id:03}.json")));
+        ensure!(wav.is_file(), "нет дубля №{id}");
+        let meta: TakeMeta = std::fs::read(&json).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        self.archive_current(line)?;
+        let raw = self.raw_wav(line);
+        if let Some(parent) = raw.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&wav, &raw).with_context(|| format!("не вернулся дубль {}", wav.display()))?;
+        let _ = std::fs::remove_file(json);
+        self.set_trim(line, meta.trim.map(|[a, b]| (a, b)))?;
+        self.set_processing(line, meta.fx)
+    }
+
+    /// Дубль — в корзину.
+    pub fn trash_take(&mut self, line: &Line, id: u32) -> Result<()> {
+        let dir = self.takes_dir(line);
+        let trash = self.export_root.join(".trash").join(&self.resource_dir);
+        std::fs::create_dir_all(&trash)?;
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        for ext in ["wav", "json"] {
+            let src = dir.join(format!("{id:03}.{ext}"));
+            if src.is_file() {
+                std::fs::rename(&src, trash.join(format!("{stamp}_{}_take{id:03}.{ext}", line.name)))?;
+            }
+        }
+        Ok(())
     }
 
     pub fn note(&self, line: &Line) -> &str {

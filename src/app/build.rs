@@ -480,7 +480,7 @@ fn newest_change<'a>(export_root: &Path, mp3s: impl Iterator<Item = &'a PathBuf>
 }
 
 /// «только что», «5 мин назад», «2 ч назад».
-fn ago(t: SystemTime) -> String {
+pub(super) fn ago(t: SystemTime) -> String {
     let secs = SystemTime::now().duration_since(t).map(|d| d.as_secs()).unwrap_or(0);
     match secs {
         0..60 => "только что".into(),

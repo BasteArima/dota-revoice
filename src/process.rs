@@ -1,9 +1,11 @@
-//! Обработка записи перед игрой: шумодав → усиление → лимитер, потом обрезка.
+//! Обработка записи перед игрой: шумодав → тон → усиление → лимитер, потом обрезка.
 //!
 //! Всё неразрушающее: исходный wav не меняется, настройки хранятся в проекте,
 //! а mp3 для игры каждый раз пересобирается из исходника.
 
 use std::borrow::Cow;
+
+use serde::{Deserialize, Serialize};
 
 use crate::audio::{RATE, fade_edges, resample};
 
@@ -12,10 +14,13 @@ const DENOISE_RATE: u32 = 48000;
 /// Потолок лимитера: −0.5 dBFS, запас под mp3.
 const CEILING: f32 = 0.944;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub denoise: bool,
     pub gain_db: f32,
+    /// Сдвиг высоты голоса в полутонах.
+    pub pitch: f32,
 }
 
 /// Вся запись целиком с шумодавом и усилением — её показываем на волне.
@@ -23,6 +28,9 @@ pub fn process(raw: &[f32], s: Settings) -> Vec<f32> {
     let mut out: Cow<[f32]> = Cow::Borrowed(raw);
     if s.denoise {
         out = Cow::Owned(denoise(raw));
+    }
+    if s.pitch.abs() > 0.01 {
+        out = Cow::Owned(pitch_shift(&out, s.pitch));
     }
     if s.gain_db.abs() > 0.01 {
         let g = db_to_gain(s.gain_db);
@@ -64,6 +72,69 @@ pub fn denoise(samples: &[f32]) -> Vec<f32> {
     let mut back = resample(&out, DENOISE_RATE, RATE).unwrap_or_else(|_| samples.to_vec());
     back.resize(samples.len(), 0.0);
     back
+}
+
+/// Сдвиг высоты на `semitones` без изменения длительности: растягиваем по времени
+/// (WSOLA) и «проигрываем» быстрее или медленнее, пересчитывая частоту.
+pub fn pitch_shift(samples: &[f32], semitones: f32) -> Vec<f32> {
+    if semitones.abs() < 0.01 || samples.is_empty() {
+        return samples.to_vec();
+    }
+    let ratio = 2f32.powf(semitones / 12.0);
+    let stretched = time_stretch(samples, ratio);
+    // Частоту округляем до сотен: ресемплеру проще, а ошибка высоты меньше 0.2%.
+    let from = ((RATE as f32 * ratio / 100.0).round() * 100.0) as u32;
+    let mut out = resample(&stretched, from, RATE).unwrap_or_else(|_| samples.to_vec());
+    out.resize(samples.len(), 0.0);
+    out
+}
+
+/// WSOLA: окна по 23 мс с перекрытием 50%, каждое следующее берём там,
+/// где оно лучше всего продолжает предыдущее (по корреляции) — без «бульканья».
+fn time_stretch(x: &[f32], alpha: f32) -> Vec<f32> {
+    const N: usize = 1024;
+    const HOP: usize = N / 2;
+    const TOL: isize = 256;
+    let window: Vec<f32> = (0..N).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / N as f32).cos()).collect();
+    let get = |i: isize| if i >= 0 && (i as usize) < x.len() { x[i as usize] } else { 0.0 };
+    let target_len = (x.len() as f32 * alpha) as usize;
+    let mut out = vec![0f32; target_len + N];
+    let mut norm = vec![0f32; target_len + N];
+    let analysis_hop = HOP as f32 / alpha;
+    let mut prev = 0isize;
+    for k in 0..=target_len / HOP {
+        let ideal = (k as f32 * analysis_hop) as isize;
+        let pos = if k == 0 {
+            0
+        } else {
+            let natural = prev + HOP as isize;
+            let (mut best, mut best_c) = (ideal, f32::MIN);
+            let mut d = -TOL;
+            while d <= TOL {
+                let cand = ideal + d;
+                let c: f32 = (0..HOP).step_by(2).map(|i| get(natural + i as isize) * get(cand + i as isize)).sum();
+                if c > best_c {
+                    best_c = c;
+                    best = cand;
+                }
+                d += 2;
+            }
+            best
+        };
+        let o = k * HOP;
+        for i in 0..N {
+            out[o + i] += get(pos + i as isize) * window[i];
+            norm[o + i] += window[i];
+        }
+        prev = pos;
+    }
+    for (v, n) in out.iter_mut().zip(&norm) {
+        if *n > 1e-3 {
+            *v /= n;
+        }
+    }
+    out.truncate(target_len);
+    out
 }
 
 /// Интегральная громкость в LUFS (EBU R128). `None` — слишком коротко или тишина.
@@ -120,14 +191,14 @@ mod tests {
         let range = (0, quiet.len());
         let gain = match_gain(&original, &quiet, Settings::default(), range).unwrap();
         assert!((12.0..=15.0).contains(&gain), "gain {gain}");
-        let louder = cut(&process(&quiet, Settings { gain_db: gain, denoise: false }), range);
+        let louder = cut(&process(&quiet, Settings { gain_db: gain, ..Settings::default() }), range);
         let diff = loudness_lufs(&louder).unwrap() - loudness_lufs(&original).unwrap();
         assert!(diff.abs() < 0.5, "разница {diff}");
     }
 
     #[test]
     fn limiter_keeps_peaks_under_ceiling() {
-        let loud = process(&tone(1.0, 0.8), Settings { gain_db: 12.0, denoise: false });
+        let loud = process(&tone(1.0, 0.8), Settings { gain_db: 12.0, ..Settings::default() });
         assert!(loud.iter().all(|x| x.abs() <= CEILING + 1e-6));
     }
 
@@ -145,6 +216,18 @@ mod tests {
         assert_eq!(out.len(), noise.len());
         let energy = |s: &[f32]| s.iter().map(|x| x * x).sum::<f32>();
         assert!(energy(&out) < energy(&noise) * 0.5);
+    }
+
+    #[test]
+    fn pitch_shift_changes_frequency_not_length() {
+        let src = tone(1.0, 0.5); // 300 Гц
+        let crossings = |s: &[f32]| s[4410..39690].windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as f32 / 0.8;
+        for (semi, hz) in [(12.0, 600.0), (-12.0, 150.0), (3.0, 356.8)] {
+            let out = pitch_shift(&src, semi);
+            assert_eq!(out.len(), src.len());
+            let f = crossings(&out);
+            assert!((f - hz).abs() < hz * 0.03, "{semi} полутонов: ждали {hz} Гц, вышло {f}");
+        }
     }
 
     #[test]

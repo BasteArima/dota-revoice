@@ -15,6 +15,8 @@ hound = "3.5"
 md-5 = "0.10"
 mp3lame-encoder = "0.2"
 nnnoiseless = { version = "0.5", default-features = false }
+ogg = "0.9"
+opus-decoder = "0.1"
 rfd = "0.15"
 rubato = "0.15"
 serde = { version = "1", features = ["derive"] }
@@ -27,3 +29,8 @@ path = "src/bin/vsnd_spike.rs"
 
 [target."cfg(windows)".dependencies]
 winreg = "0.52"
+
+# В opus-decoder есть сдвиги, которые в debug ловятся как переполнение,
+# а в release работают как в libopus (проверено на tests/data). Ведём себя одинаково.
+[profile.dev.package.opus-decoder]
+overflow-checks = false
