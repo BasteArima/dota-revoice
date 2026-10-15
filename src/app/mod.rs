@@ -7,10 +7,10 @@ mod theme;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dota_revoice::audio::{self, Clip, Player, Recorder, Track};
-use dota_revoice::encode;
+use dota_revoice::{encode, install};
 use dota_revoice::process::{self, Settings};
 use dota_revoice::game::{self, DotaInstall};
 use dota_revoice::project::{self, Line, Project, Status, Take};
@@ -21,6 +21,8 @@ use build::BuildState;
 use theme::{GOLD, ON_GOLD, PANEL, RED, icon};
 
 const MIN_TAKE_SECS: f32 = 0.2;
+/// Как часто перепроверять игру: Steam мог обновить Доту, пока программа открыта.
+const GAME_CHECK: Duration = Duration::from_secs(5);
 const COMPARE_GAP_SECS: f32 = 0.4;
 /// Минимальная длина обрезанной фразы.
 const MIN_TRIM_SAMPLES: usize = audio::RATE as usize / 10;
@@ -89,6 +91,9 @@ pub struct App {
     takes: Vec<Take>,
     /// Ширина переключателя вкладок с прошлого кадра — чтобы поставить его по центру.
     tabs_width: f32,
+    /// Что не так с игрой (Steam вернул озвучку Valve и т.п.) — баннер сверху.
+    alert: Option<install::Alert>,
+    game_checked: Option<Instant>,
     player: Option<Player>,
     recorder: Option<Recorder>,
     input_devices: Vec<String>,
@@ -123,6 +128,8 @@ impl App {
             pending: None,
             takes: Vec::new(),
             tabs_width: 270.0,
+            alert: None,
+            game_checked: None,
             player: None,
             recorder: None,
             input_devices: Recorder::input_device_names(),
@@ -781,6 +788,42 @@ impl App {
         });
     }
 
+    /// Перечитывает состояние игры: язык озвучки, на месте ли пак Valve.
+    fn check_game(&mut self) {
+        if self.game_checked.is_some_and(|t| t.elapsed() < GAME_CHECK) {
+            return;
+        }
+        self.game_checked = Some(Instant::now());
+        self.dota = game::find_dota();
+        self.alert = self.dota.as_ref().and_then(install::check);
+    }
+
+    /// Предупреждение под верхней панелью — видно на обеих вкладках.
+    fn alert_banner(&mut self, ui: &mut egui::Ui, alert: install::Alert) {
+        let (text, action) = match alert {
+            install::Alert::ValveRestored => (
+                "Steam вернул озвучку Valve — так бывает после обновления Доты или проверки файлов. Сейчас в игре звучат не твои фразы.",
+                Some("Переустановить"),
+            ),
+            install::Alert::EnglishAudio => (
+                "В Доте выбрана английская озвучка — моды из папки языка не загружаются. Переключи язык озвучки игры на русский и перезапусти её.",
+                None,
+            ),
+        };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(icon::WARNING).size(18.0).color(theme::AMBER));
+            ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT)).wrap());
+            if let Some(label) = action {
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(theme::primary(label)).on_hover_text("Пересобрать и установить пак заново").clicked() {
+                        self.screen = Screen::Build;
+                        self.build.refresh_now();
+                    }
+                });
+            }
+        });
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         // Статус Доты справа целиком, сообщение слева обрезается по ширине.
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -799,12 +842,20 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.check_game();
         self.handle_keys(ctx);
         self.tick_pending(ctx);
         self.poll_build_tasks();
 
         let bar_frame = egui::Frame::side_top_panel(&ctx.style()).fill(PANEL).inner_margin(egui::Margin::symmetric(14, 10));
         egui::TopBottomPanel::top("top").frame(bar_frame).show(ctx, |ui| self.top_bar(ui));
+        if let Some(alert) = self.alert {
+            let frame = egui::Frame::default()
+                .fill(theme::AMBER.gamma_multiply(0.14))
+                .stroke(egui::Stroke::new(1.0_f32, theme::AMBER.gamma_multiply(0.5)))
+                .inner_margin(egui::Margin::symmetric(16, 8));
+            egui::TopBottomPanel::top("alert").frame(frame).show(ctx, |ui| self.alert_banner(ui, alert));
+        }
         egui::TopBottomPanel::bottom("status")
             .frame(egui::Frame::side_top_panel(&ctx.style()).fill(PANEL).inner_margin(egui::Margin::symmetric(14, 5)))
             .show(ctx, |ui| self.status_bar(ui));

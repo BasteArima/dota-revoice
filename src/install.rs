@@ -104,6 +104,29 @@ pub fn rollback(dota: &DotaInstall) -> Result<Vec<String>> {
     Ok(done)
 }
 
+/// Что не так с игрой с точки зрения мода — показываем предупреждением.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alert {
+    /// Наш пак лежит, но Steam вернул `pak01_dir.vpk` (обновление или проверка файлов) —
+    /// озвучка Valve снова перекрывает наши фразы.
+    ValveRestored,
+    /// В Доте английская озвучка: папки языка нет, моды оттуда не грузятся.
+    EnglishAudio,
+}
+
+pub fn check(dota: &DotaInstall) -> Option<Alert> {
+    let Some(dir) = dota.language_dir() else { return Some(Alert::EnglishAudio) };
+    let ours = dir.join(PAK_NAME).is_file();
+    let valve_on = dota.voice_pak().is_some_and(|v| v.enabled);
+    (ours && valve_on).then_some(Alert::ValveRestored)
+}
+
+/// Время изменения пака озвучки Valve: Steam ставит новое при каждом обновлении,
+/// а наше переименование в `.off` его сохраняет. Новее собранного пака — пора пересобрать.
+pub fn valve_pak_modified(dota: &DotaInstall) -> Option<std::time::SystemTime> {
+    std::fs::metadata(dota.voice_pak()?.path).ok()?.modified().ok()
+}
+
 /// Установлено ли что-то нашего: есть `pak02` или отключённый пак Valve.
 pub fn has_changes(dota: &DotaInstall) -> bool {
     dota.language_dir()
@@ -190,6 +213,26 @@ mod tests {
         assert_eq!(std::fs::read(lang.join("pak01_dir.vpk")).unwrap(), b"valve");
         assert!(!has_changes(&dota));
         assert!(rollback(&dota).is_err(), "второй откат — нечего откатывать");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn alerts() {
+        let (dota, root) = fake_dota("alerts", true);
+        let lang = dota.language_dir().unwrap();
+        // Только пак Valve, нашего нет — всё штатно.
+        assert_eq!(check(&dota), None);
+        // Наш пак установлен и Valve отключён — тоже штатно.
+        std::fs::write(lang.join(PAK_NAME), b"ours").unwrap();
+        std::fs::rename(lang.join("pak01_dir.vpk"), lang.join("pak01_dir.vpk.off")).unwrap();
+        assert_eq!(check(&dota), None);
+        // Steam вернул pak01_dir.vpk — наш пак снова перекрыт.
+        std::fs::write(lang.join("pak01_dir.vpk"), b"valve again").unwrap();
+        assert_eq!(check(&dota), Some(Alert::ValveRestored));
+        // Английская озвучка — папки языка нет.
+        let english = DotaInstall { audio_language: None, ..dota.clone() };
+        assert_eq!(check(&english), Some(Alert::EnglishAudio));
+        assert!(valve_pak_modified(&dota).is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

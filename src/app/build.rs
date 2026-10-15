@@ -43,10 +43,15 @@ struct Snapshot {
     valve_enabled: bool,
     has_changes: bool,
     dota_running: bool,
+    /// Steam обновил озвучку Valve после нашей сборки — в паке старые фразы Valve.
+    valve_newer: bool,
 }
 
 impl Snapshot {
     fn needs_rebuild(&self) -> bool {
+        if self.valve_newer {
+            return true;
+        }
         match (self.built, self.newest_change) {
             (None, _) => true,
             (Some((_, built)), Some(changed)) => changed > built,
@@ -163,6 +168,11 @@ impl App {
             valve_enabled: self.dota.as_ref().and_then(|d| d.voice_pak()).is_some_and(|v| v.enabled),
             has_changes: self.dota.as_ref().is_some_and(install::has_changes),
             dota_running: install::is_dota_running(),
+            valve_newer: self.build.use_base
+                && match (built, self.dota.as_ref().and_then(install::valve_pak_modified)) {
+                    (Some((_, built)), Some(valve)) => valve > built,
+                    _ => false,
+                },
         });
     }
 
@@ -250,6 +260,7 @@ impl App {
                 ui.label(theme::title("Собрать пак", 15.0));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| match (snap.built.is_some(), snap.needs_rebuild()) {
                     (true, false) => theme::pill(ui, "собран", GREEN),
+                    (true, true) if snap.valve_newer => theme::pill(ui, "озвучка игры обновилась", AMBER),
                     (true, true) => theme::pill(ui, "есть новые записи", AMBER),
                     _ => theme::pill(ui, "не собран", MUTED),
                 });
@@ -263,6 +274,9 @@ impl App {
                 info += &format!(" · пак {:.0} МБ, собран {}", size as f64 / 1_048_576.0, ago(at));
             }
             ui.label(theme::small(info));
+            if snap.valve_newer {
+                ui.label(RichText::new("Steam обновил озвучку Valve после сборки — пересобери, чтобы в паке были свежие фразы игры.").size(12.0).color(AMBER));
+            }
 
             if self.dota.as_ref().and_then(|d| d.voice_pak()).is_some() {
                 let text = format!(
@@ -299,7 +313,9 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if snap.installed_ok() {
                         theme::pill(ui, "установлено", GREEN);
-                    } else if snap.installed == Installed::Other || (snap.installed == Installed::Same && snap.valve_enabled) {
+                    } else if snap.installed != Installed::No && snap.valve_enabled {
+                        theme::pill(ui, "Steam вернул озвучку Valve", AMBER);
+                    } else if snap.installed == Installed::Other {
                         theme::pill(ui, "в игре старая версия", AMBER);
                     } else {
                         theme::pill(ui, "не установлено", MUTED);
