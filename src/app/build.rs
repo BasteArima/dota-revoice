@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
-use dota_revoice::{install, pack};
+use dota_revoice::{exchange, install, pack};
 use eframe::egui::{self, Align, Align2, Color32, FontId, RichText, Sense, Stroke, vec2};
 
 use super::theme::{self, AMBER, BG_DEEP, FAINT, GOLD, GREEN, LINE, MUTED, ON_GOLD, RED, TEXT, icon};
@@ -74,6 +74,9 @@ pub(super) struct BuildState {
     game_result: Option<Result<String, String>>,
     snapshot: Option<Snapshot>,
     refreshed: Option<Instant>,
+    /// При импорте пачки заменять фразы, которые у меня уже есть.
+    import_replace: bool,
+    exchange_result: Option<Result<String, String>>,
 }
 
 impl Default for BuildState {
@@ -88,6 +91,8 @@ impl Default for BuildState {
             game_result: None,
             snapshot: None,
             refreshed: None,
+            import_replace: false,
+            exchange_result: None,
         }
     }
 }
@@ -247,6 +252,8 @@ impl App {
                 self.step_install(ui, &ctx, &snap, state(2));
                 ui.add_space(10.0);
                 self.step_launch(ui, &snap, current, state(3));
+                ui.add_space(22.0);
+                self.exchange_card(ui);
                 ui.add_space(14.0);
                 self.build_details(ui);
             });
@@ -423,6 +430,78 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Обмен фразами: собрать свои в один zip или добавить присланные.
+    fn exchange_card(&mut self, ui: &mut egui::Ui) {
+        theme::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon::USERS_THREE).size(18.0).color(GOLD));
+                ui.label(theme::title("Обмен с друзьями", 15.0));
+            });
+            ui.label(theme::small(
+                "Собери все свои фразы в один файл и отправь другу — или добавь фразы, которые прислали тебе. Потом пересобери и установи пак.",
+            ));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.add(theme::tool(format!("{}  Экспорт пачки…", icon::EXPORT))).on_hover_text("Все записанные фразы всех героев + заметки, в zip").clicked() {
+                    self.export_pack();
+                }
+                if ui.add(theme::tool(format!("{}  Импорт пачки…", icon::DOWNLOAD_SIMPLE))).on_hover_text("zip, который прислал друг").clicked() {
+                    self.import_pack();
+                }
+                if theme::chip(ui, self.build.import_replace, "заменять мои версии").on_hover_text("Твоя версия уйдёт в дубли — её можно вернуть").clicked() {
+                    self.build.import_replace = !self.build.import_replace;
+                }
+            });
+            result_line(ui, self.build.exchange_result.as_ref());
+        });
+    }
+
+    fn export_pack(&mut self) {
+        let Some(p) = &self.project else { return };
+        let Some(out) = rfd::FileDialog::new()
+            .set_title("Куда сохранить пачку фраз")
+            .set_file_name("dota_revoice_фразы.zip")
+            .add_filter("Пачка фраз", &["zip"])
+            .save_file()
+        else {
+            return;
+        };
+        self.build.exchange_result = Some(match exchange::export_pack(&p.export_root, &out) {
+            Ok(n) => Ok(format!("В пачке {n} фраз: {}", out.display())),
+            Err(e) => Err(format!("{e:#}")),
+        });
+    }
+
+    fn import_pack(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.export_root.clone()) else { return };
+        let Some(file) = rfd::FileDialog::new().set_title("Пачка фраз от друга").add_filter("Пачка фраз", &["zip"]).pick_file() else {
+            return;
+        };
+        let result = exchange::import_pack(&root, &file, self.build.import_replace);
+        self.build.exchange_result = Some(match result {
+            Ok(s) => {
+                let mut parts = vec![format!("Добавлено {}", s.added)];
+                if s.replaced > 0 {
+                    parts.push(format!("заменено {} (твои версии — в дублях)", s.replaced));
+                }
+                if !s.kept.is_empty() {
+                    parts.push(format!("оставлены твои: {}", s.kept.len()));
+                }
+                if !s.rejected.is_empty() {
+                    parts.push(format!("пропущены лишние файлы: {}", s.rejected.len()));
+                }
+                Ok(parts.join(" · "))
+            }
+            Err(e) => Err(format!("{e:#}")),
+        });
+        // Новые фразы могут быть и у открытого героя — перечитываем.
+        if let Some(p) = self.project.as_mut() {
+            p.rescan();
+        }
+        self.select(self.selected);
+        self.build.refresh_now();
     }
 
     fn build_details(&mut self, ui: &mut egui::Ui) {

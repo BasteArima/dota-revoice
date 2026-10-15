@@ -25,9 +25,11 @@ cargo run --bin vsnd_spike -- [--base <pak01_dir.vpk>] out.vpk sounds/vo/<hero>/
 | `vsnd.rs` | Пишет `.vsnd_c` (скомпилированный звук Source 2) с mp3 внутри |
 | `vpk.rs` | Чтение VPK v2 (в т.ч. многотомных и `*_dir.vpk.off`) и запись «одним файлом» |
 | `pack.rs` | Сборка `pak02_dir.vpk`: база из пака Valve + мои фразы из `export/` |
+| `exchange.rs` | Пачки фраз для друзей: экспорт/импорт zip; своё при замене уходит в дубли |
+| `update.rs` | Проверка новой версии на GitHub (релизы `BasteArima/dota-revoice`) |
 | `install.rs` | Установка `pak02` в папку языка, отключение `pak01` (`.off`), откат |
 | `game.rs` | Поиск Steam/Доты, `AudioLanguage` из `boot.vcfg`, пак озвучки |
-| `project.rs` | Проект героя: фразы, категории, статусы, обрезка, пути экспорта, корзина |
+| `project.rs` | `Store` — хранилище `export/` по путям ресурсов (состояние, дубли, корзина); `Project` — герой поверх него |
 | `audio.rs` | symphonia (чтение), rubato (ресемплинг), cpal (воспроизведение и запись) |
 | `process.rs` | Обработка записи: шумодав (nnnoiseless) → тон (WSOLA) → усиление → лимитер, громкость в LUFS (ebur128) |
 | `opus.rs` | Голосовые Telegram: Ogg (`ogg`) + Opus (`opus-decoder`, чистый Rust). В debug для крейта отключены overflow-checks — см. Cargo.toml |
@@ -89,5 +91,9 @@ cargo run --bin vsnd_spike -- [--base <pak01_dir.vpk>] out.vpk sounds/vo/<hero>/
    Доты через Steam, ✅ баннер «Steam вернул озвучку Valve» и «английская озвучка»
    (перепроверка игры раз в 5 с, `install::check`), ✅ пересборка, если пак Valve новее
    собранного (Steam ставит новое время файла при обновлении, переименование его хранит).
-5. Этап 4: GitHub Actions (Windows + macOS), релизы, обмен пачками фраз (zip),
-   автообновление, README с лицензиями (LAME — LGPL).
+5. Этап 4: ✅ CI (`.github/workflows/ci.yml`: тесты + clippy на Windows/macOS),
+   ✅ релизы по тегу `v*` (`release.yml`: zip с exe, универсальный .app с разрешением
+   на микрофон из `packaging/macos/Info.plist`; тег обязан совпадать с версией в
+   Cargo.toml), ✅ обмен пачками фраз (`exchange.rs`, zip с mp3 и заметками),
+   ✅ уведомление о новой версии (`update.rs`, GitHub API, без самообновления),
+   ✅ README с лицензиями.

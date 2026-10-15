@@ -6,11 +6,11 @@ mod theme;
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use dota_revoice::audio::{self, Clip, Player, Recorder, Track};
-use dota_revoice::{encode, install};
+use dota_revoice::{encode, install, update};
 use dota_revoice::process::{self, Settings};
 use dota_revoice::game::{self, DotaInstall};
 use dota_revoice::project::{self, Line, Project, Status, Take};
@@ -94,6 +94,9 @@ pub struct App {
     /// Что не так с игрой (Steam вернул озвучку Valve и т.п.) — баннер сверху.
     alert: Option<install::Alert>,
     game_checked: Option<Instant>,
+    /// Ответ GitHub о новой версии (проверяется в фоне при запуске).
+    update_rx: Option<mpsc::Receiver<update::Release>>,
+    update: Option<update::Release>,
     player: Option<Player>,
     recorder: Option<Recorder>,
     input_devices: Vec<String>,
@@ -130,6 +133,8 @@ impl App {
             tabs_width: 270.0,
             alert: None,
             game_checked: None,
+            update_rx: None,
+            update: None,
             player: None,
             recorder: None,
             input_devices: Recorder::input_device_names(),
@@ -144,6 +149,7 @@ impl App {
             Err(e) => app.error(format!("Звук не выводится: {e:#}")),
         }
         app.open_recorder(app.config.input_device.clone());
+        app.start_update_check(&cc.egui_ctx);
         if let Some(folder) = app.config.last_folder.clone().filter(|f| f.is_dir()) {
             app.open_project(&folder);
         }
@@ -788,6 +794,39 @@ impl App {
         });
     }
 
+    /// В фоне спрашивает у GitHub, нет ли новой версии. Без сети просто молчит.
+    fn start_update_check(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            if let Ok(Some(release)) = update::check() {
+                let _ = tx.send(release);
+                ctx.request_repaint();
+            }
+        });
+        self.update_rx = Some(rx);
+    }
+
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(release) = self.update.clone() else { return };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(icon::SPARKLE).size(18.0).color(GOLD));
+            ui.label(RichText::new(format!(
+                "Вышла новая версия {} (у тебя {}). Скачай её со страницы релиза и замени старую программу.",
+                release.version,
+                env!("CARGO_PKG_VERSION")
+            )).color(theme::TEXT));
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if theme::ghost(ui, true, icon::X).on_hover_text("Скрыть до следующего запуска").clicked() {
+                    self.update = None;
+                }
+                if ui.add(theme::primary(format!("{}  Скачать", icon::DOWNLOAD_SIMPLE))).clicked() {
+                    open_url(&release.url);
+                }
+            });
+        });
+    }
+
     /// Перечитывает состояние игры: язык озвучки, на месте ли пак Valve.
     fn check_game(&mut self) {
         if self.game_checked.is_some_and(|t| t.elapsed() < GAME_CHECK) {
@@ -843,6 +882,12 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.check_game();
+        if let Some(rx) = &self.update_rx
+            && let Ok(release) = rx.try_recv()
+        {
+            self.update = Some(release);
+            self.update_rx = None;
+        }
         self.handle_keys(ctx);
         self.tick_pending(ctx);
         self.poll_build_tasks();
@@ -855,6 +900,13 @@ impl eframe::App for App {
                 .stroke(egui::Stroke::new(1.0_f32, theme::AMBER.gamma_multiply(0.5)))
                 .inner_margin(egui::Margin::symmetric(16, 8));
             egui::TopBottomPanel::top("alert").frame(frame).show(ctx, |ui| self.alert_banner(ui, alert));
+        }
+        if self.update.is_some() {
+            let frame = egui::Frame::default()
+                .fill(GOLD.gamma_multiply(0.10))
+                .stroke(egui::Stroke::new(1.0_f32, GOLD.gamma_multiply(0.4)))
+                .inner_margin(egui::Margin::symmetric(16, 8));
+            egui::TopBottomPanel::top("update").frame(frame).show(ctx, |ui| self.update_banner(ui));
         }
         egui::TopBottomPanel::bottom("status")
             .frame(egui::Frame::side_top_panel(&ctx.style()).fill(PANEL).inner_margin(egui::Margin::symmetric(14, 5)))
@@ -876,7 +928,9 @@ impl eframe::App for App {
             Screen::Build => {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 18)))
-                    .show(ctx, |ui| self.build_screen(ui));
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.build_screen(ui));
+                    });
             }
         }
 
@@ -928,6 +982,19 @@ fn dota_status(dota: Option<&DotaInstall>) -> String {
         Some(_) => format!("Дота · озвучка {lang} · работает наш пак"),
         None => format!("Дота · озвучка {lang} · пак озвучки не скачан"),
     }
+}
+
+fn open_url(url: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).creation_flags(CREATE_NO_WINDOW).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 fn reveal(path: &Path) {

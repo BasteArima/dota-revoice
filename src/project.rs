@@ -8,7 +8,8 @@
 //! example/export/sounds/vo/bounty_hunter/bount_kill_01.mp3 ← моя фраза, то же имя
 //! example/export/.raw/sounds/vo/bounty_hunter/…wav          ← исходник без потерь
 //! example/export/.trash/…                                    ← удалённое
-//! example/export/dota_revoice.json                          ← пометки «переделать»
+//! example/export/.takes/…                                    ← прежние дубли
+//! example/export/dota_revoice.json                          ← обрезка, обработка, заметки
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -75,6 +76,195 @@ struct TakeMeta {
     fx: crate::process::Settings,
 }
 
+/// Хранилище моих фраз в `export/` — по путям ресурсов (`sounds/vo/hero/name`),
+/// без привязки к открытому герою: им пользуются и проект, и импорт пачек.
+pub struct Store {
+    pub root: PathBuf,
+    state: State,
+}
+
+impl Store {
+    pub fn open(root: &Path) -> Self {
+        let state = std::fs::read(root.join(STATE_FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        Self { root: root.to_path_buf(), state }
+    }
+
+    fn save(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.root)?;
+        std::fs::write(self.root.join(STATE_FILE), serde_json::to_vec_pretty(&self.state)?)?;
+        Ok(())
+    }
+
+    fn save_if(&self, changed: bool) -> Result<()> {
+        if changed { self.save() } else { Ok(()) }
+    }
+
+    /// Моя фраза для игры.
+    pub fn mp3(&self, res: &str) -> PathBuf {
+        self.root.join(format!("{res}.mp3"))
+    }
+
+    /// Исходник без потерь.
+    pub fn raw(&self, res: &str) -> PathBuf {
+        self.root.join(".raw").join(format!("{res}.wav"))
+    }
+
+    /// Папка прежних дублей: `export/.takes/sounds/vo/hero/name/`.
+    fn takes_dir(&self, res: &str) -> PathBuf {
+        self.root.join(".takes").join(res)
+    }
+
+    /// Корзина для фразы и её имя файла: (`export/.trash/sounds/vo/hero`, `name`).
+    fn trash_place(&self, res: &str) -> (PathBuf, String) {
+        let (dir, name) = res.rsplit_once('/').unwrap_or(("", res));
+        (self.root.join(".trash").join(dir), name.to_owned())
+    }
+
+    pub fn is_redo(&self, res: &str) -> bool {
+        self.state.redo.contains(res)
+    }
+
+    pub fn set_redo(&mut self, res: &str, redo: bool) -> Result<()> {
+        let changed = if redo { self.state.redo.insert(res.to_owned()) } else { self.state.redo.remove(res) };
+        self.save_if(changed)
+    }
+
+    /// Обрезка фразы в секундах; `None` — фраза целиком.
+    pub fn trim(&self, res: &str) -> Option<(f32, f32)> {
+        self.state.trims.get(res).map(|&[a, b]| (a, b))
+    }
+
+    pub fn set_trim(&mut self, res: &str, trim: Option<(f32, f32)>) -> Result<()> {
+        let changed = match trim {
+            Some((a, b)) => self.state.trims.insert(res.to_owned(), [a, b]) != Some([a, b]),
+            None => self.state.trims.remove(res).is_some(),
+        };
+        self.save_if(changed)
+    }
+
+    /// Шумодав, усиление и тон для фразы.
+    pub fn processing(&self, res: &str) -> crate::process::Settings {
+        crate::process::Settings {
+            denoise: self.state.denoise.contains(res),
+            gain_db: self.state.gains.get(res).copied().unwrap_or(0.0),
+            pitch: self.state.pitches.get(res).copied().unwrap_or(0.0),
+        }
+    }
+
+    pub fn set_processing(&mut self, res: &str, s: crate::process::Settings) -> Result<()> {
+        let denoise_changed = if s.denoise { self.state.denoise.insert(res.to_owned()) } else { self.state.denoise.remove(res) };
+        let set = |map: &mut BTreeMap<String, f32>, v: f32| {
+            if v.abs() < 0.05 { map.remove(res).is_some() } else { map.insert(res.to_owned(), v) != Some(v) }
+        };
+        let gain_changed = set(&mut self.state.gains, s.gain_db);
+        let pitch_changed = set(&mut self.state.pitches, s.pitch);
+        self.save_if(denoise_changed || gain_changed || pitch_changed)
+    }
+
+    pub fn note(&self, res: &str) -> &str {
+        self.state.notes.get(res).map_or("", String::as_str)
+    }
+
+    /// Пустая заметка удаляется.
+    pub fn set_note(&mut self, res: &str, note: &str) -> Result<()> {
+        let note = note.trim();
+        let changed = if note.is_empty() {
+            self.state.notes.remove(res).is_some()
+        } else {
+            self.state.notes.insert(res.to_owned(), note.to_owned()).as_deref() != Some(note)
+        };
+        self.save_if(changed)
+    }
+
+    /// Все заметки: путь ресурса → текст.
+    pub fn notes(&self) -> &BTreeMap<String, String> {
+        &self.state.notes
+    }
+
+    /// Прежние дубли, новые первыми.
+    pub fn takes(&self, res: &str) -> Vec<Take> {
+        let Ok(entries) = std::fs::read_dir(self.takes_dir(res)) else { return Vec::new() };
+        let mut takes: Vec<Take> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter_map(|path| {
+                let id = path.extension().filter(|e| *e == "wav")?.to_str().and(path.file_stem()?.to_str()?.parse().ok())?;
+                let secs = hound::WavReader::open(&path).map(|r| r.duration() as f32 / r.spec().sample_rate as f32).unwrap_or(0.0);
+                let saved = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                Some(Take { id, path, saved, secs })
+            })
+            .collect();
+        takes.sort_by_key(|t| std::cmp::Reverse(t.id));
+        takes
+    }
+
+    /// Убирает текущий исходник в дубли (вместе с его обрезкой и обработкой).
+    pub fn archive_current(&mut self, res: &str) -> Result<()> {
+        let raw = self.raw(res);
+        if !raw.is_file() {
+            return Ok(());
+        }
+        let dir = self.takes_dir(res);
+        std::fs::create_dir_all(&dir)?;
+        let id = self.takes(res).first().map_or(1, |t| t.id + 1);
+        let meta = TakeMeta { trim: self.trim(res).map(|(a, b)| [a, b]), fx: self.processing(res) };
+        std::fs::write(dir.join(format!("{id:03}.json")), serde_json::to_vec_pretty(&meta)?)?;
+        std::fs::rename(&raw, dir.join(format!("{id:03}.wav"))).with_context(|| format!("не перенёсся в дубли {}", raw.display()))?;
+        Ok(())
+    }
+
+    /// Возвращает дубль `id` в работу, текущий исходник уходит в дубли.
+    /// mp3 для игры после этого нужно пересобрать.
+    pub fn restore_take(&mut self, res: &str, id: u32) -> Result<()> {
+        let dir = self.takes_dir(res);
+        let (wav, json) = (dir.join(format!("{id:03}.wav")), dir.join(format!("{id:03}.json")));
+        ensure!(wav.is_file(), "нет дубля №{id}");
+        let meta: TakeMeta = std::fs::read(&json).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        self.archive_current(res)?;
+        let raw = self.raw(res);
+        if let Some(parent) = raw.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&wav, &raw).with_context(|| format!("не вернулся дубль {}", wav.display()))?;
+        let _ = std::fs::remove_file(json);
+        self.set_trim(res, meta.trim.map(|[a, b]| (a, b)))?;
+        self.set_processing(res, meta.fx)
+    }
+
+    /// Дубль — в корзину.
+    pub fn trash_take(&mut self, res: &str, id: u32) -> Result<()> {
+        let dir = self.takes_dir(res);
+        let (trash, name) = self.trash_place(res);
+        std::fs::create_dir_all(&trash)?;
+        for ext in ["wav", "json"] {
+            let src = dir.join(format!("{id:03}.{ext}"));
+            if src.is_file() {
+                std::fs::rename(&src, trash.join(format!("{}_{name}_take{id:03}.{ext}", stamp())))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Переносит мою фразу (и её wav) в `export/.trash`, ничего не удаляя насовсем.
+    pub fn trash(&mut self, res: &str) -> Result<()> {
+        let (trash, _) = self.trash_place(res);
+        std::fs::create_dir_all(&trash)?;
+        for src in [self.mp3(res), self.raw(res)] {
+            if src.is_file() {
+                let name = src.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                std::fs::rename(&src, trash.join(format!("{}_{name}", stamp())))
+                    .with_context(|| format!("не перенёсся в корзину {}", src.display()))?;
+            }
+        }
+        self.set_trim(res, None)?;
+        self.set_processing(res, crate::process::Settings::default())?;
+        self.set_redo(res, false)
+    }
+}
+
+fn stamp() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
 pub struct Project {
     pub source_dir: PathBuf,
     pub export_root: PathBuf,
@@ -83,7 +273,7 @@ pub struct Project {
     pub hero: String,
     pub lines: Vec<Line>,
     recorded: HashSet<String>,
-    state: State,
+    store: Store,
 }
 
 impl Project {
@@ -108,25 +298,16 @@ impl Project {
             .map(|(original, name)| Line { category: category(&name, &prefix), name, original })
             .collect();
 
-        let state = std::fs::read(export_root.join(STATE_FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-
-        let mut project =
-            Self { source_dir, export_root, resource_dir, hero, lines, recorded: HashSet::new(), state };
+        let store = Store::open(&export_root);
+        let mut project = Self { source_dir, export_root, resource_dir, hero, lines, recorded: HashSet::new(), store };
         project.rescan();
         Ok(project)
     }
 
-    /// Перечитать, какие фразы уже записаны.
+    /// Перечитать с диска: какие фразы записаны и состояние (после импорта пачки).
     pub fn rescan(&mut self) {
-        self.recorded = self
-            .lines
-            .iter()
-            .filter(|l| self.export_mp3(l).is_file())
-            .map(|l| l.name.clone())
-            .collect();
+        self.store = Store::open(&self.export_root);
+        self.recorded = self.lines.iter().filter(|l| self.export_mp3(l).is_file()).map(|l| l.name.clone()).collect();
     }
 
     pub fn resource_path(&self, line: &Line) -> String {
@@ -135,15 +316,15 @@ impl Project {
 
     /// Моя фраза: то же имя, что у оригинала.
     pub fn export_mp3(&self, line: &Line) -> PathBuf {
-        self.export_root.join(&self.resource_dir).join(format!("{}.mp3", line.name))
+        self.store.mp3(&self.resource_path(line))
     }
 
     pub fn raw_wav(&self, line: &Line) -> PathBuf {
-        self.export_root.join(".raw").join(&self.resource_dir).join(format!("{}.wav", line.name))
+        self.store.raw(&self.resource_path(line))
     }
 
     pub fn status(&self, line: &Line) -> Status {
-        if self.state.redo.contains(&self.resource_path(line)) {
+        if self.store.is_redo(&self.resource_path(line)) {
             Status::Redo
         } else if self.recorded.contains(&line.name) {
             Status::Recorded
@@ -162,153 +343,69 @@ impl Project {
     }
 
     pub fn set_redo(&mut self, line: &Line, redo: bool) -> Result<()> {
-        let key = self.resource_path(line);
-        let changed = if redo { self.state.redo.insert(key) } else { self.state.redo.remove(&key) };
-        if changed { self.save_state() } else { Ok(()) }
+        let res = self.resource_path(line);
+        self.store.set_redo(&res, redo)
     }
 
     /// Обрезка фразы в секундах; `None` — фраза целиком.
     pub fn trim(&self, line: &Line) -> Option<(f32, f32)> {
-        self.state.trims.get(&self.resource_path(line)).map(|&[a, b]| (a, b))
+        self.store.trim(&self.resource_path(line))
     }
 
     pub fn set_trim(&mut self, line: &Line, trim: Option<(f32, f32)>) -> Result<()> {
-        let key = self.resource_path(line);
-        let changed = match trim {
-            Some((a, b)) => self.state.trims.insert(key, [a, b]) != Some([a, b]),
-            None => self.state.trims.remove(&key).is_some(),
-        };
-        if changed { self.save_state() } else { Ok(()) }
+        let res = self.resource_path(line);
+        self.store.set_trim(&res, trim)
     }
 
-    /// Шумодав и усиление для фразы.
+    /// Шумодав, усиление и тон для фразы.
     pub fn processing(&self, line: &Line) -> crate::process::Settings {
-        let key = self.resource_path(line);
-        crate::process::Settings {
-            denoise: self.state.denoise.contains(&key),
-            gain_db: self.state.gains.get(&key).copied().unwrap_or(0.0),
-            pitch: self.state.pitches.get(&key).copied().unwrap_or(0.0),
-        }
+        self.store.processing(&self.resource_path(line))
     }
 
     pub fn set_processing(&mut self, line: &Line, s: crate::process::Settings) -> Result<()> {
-        let key = self.resource_path(line);
-        let denoise_changed = if s.denoise { self.state.denoise.insert(key.clone()) } else { self.state.denoise.remove(&key) };
-        let set = |map: &mut BTreeMap<String, f32>, v: f32| {
-            if v.abs() < 0.05 { map.remove(&key).is_some() } else { map.insert(key.clone(), v) != Some(v) }
-        };
-        let gain_changed = set(&mut self.state.gains, s.gain_db);
-        let pitch_changed = set(&mut self.state.pitches, s.pitch);
-        if denoise_changed || gain_changed || pitch_changed { self.save_state() } else { Ok(()) }
-    }
-
-    /// Папка прежних дублей фразы: `export/.takes/sounds/vo/hero/name/`.
-    fn takes_dir(&self, line: &Line) -> PathBuf {
-        self.export_root.join(".takes").join(&self.resource_dir).join(&line.name)
+        let res = self.resource_path(line);
+        self.store.set_processing(&res, s)
     }
 
     /// Прежние дубли, новые первыми.
     pub fn takes(&self, line: &Line) -> Vec<Take> {
-        let Ok(entries) = std::fs::read_dir(self.takes_dir(line)) else { return Vec::new() };
-        let mut takes: Vec<Take> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter_map(|path| {
-                let id = path.extension().filter(|e| *e == "wav")?.to_str().and(path.file_stem()?.to_str()?.parse().ok())?;
-                let secs = hound::WavReader::open(&path).map(|r| r.duration() as f32 / r.spec().sample_rate as f32).unwrap_or(0.0);
-                let saved = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                Some(Take { id, path, saved, secs })
-            })
-            .collect();
-        takes.sort_by_key(|t| std::cmp::Reverse(t.id));
-        takes
+        self.store.takes(&self.resource_path(line))
     }
 
     /// Убирает текущий исходник в дубли (вместе с его обрезкой и обработкой).
     pub fn archive_current(&mut self, line: &Line) -> Result<()> {
-        let raw = self.raw_wav(line);
-        if !raw.is_file() {
-            return Ok(());
-        }
-        let dir = self.takes_dir(line);
-        std::fs::create_dir_all(&dir)?;
-        let id = self.takes(line).first().map_or(1, |t| t.id + 1);
-        let meta = TakeMeta { trim: self.trim(line).map(|(a, b)| [a, b]), fx: self.processing(line) };
-        std::fs::write(dir.join(format!("{id:03}.json")), serde_json::to_vec_pretty(&meta)?)?;
-        std::fs::rename(&raw, dir.join(format!("{id:03}.wav"))).with_context(|| format!("не перенёсся в дубли {}", raw.display()))?;
-        Ok(())
+        let res = self.resource_path(line);
+        self.store.archive_current(&res)
     }
 
     /// Возвращает дубль `id` в работу, текущий исходник уходит в дубли.
-    /// mp3 для игры после этого нужно пересобрать.
     pub fn restore_take(&mut self, line: &Line, id: u32) -> Result<()> {
-        let dir = self.takes_dir(line);
-        let (wav, json) = (dir.join(format!("{id:03}.wav")), dir.join(format!("{id:03}.json")));
-        ensure!(wav.is_file(), "нет дубля №{id}");
-        let meta: TakeMeta = std::fs::read(&json).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        self.archive_current(line)?;
-        let raw = self.raw_wav(line);
-        if let Some(parent) = raw.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::rename(&wav, &raw).with_context(|| format!("не вернулся дубль {}", wav.display()))?;
-        let _ = std::fs::remove_file(json);
-        self.set_trim(line, meta.trim.map(|[a, b]| (a, b)))?;
-        self.set_processing(line, meta.fx)
+        let res = self.resource_path(line);
+        self.store.restore_take(&res, id)
     }
 
     /// Дубль — в корзину.
     pub fn trash_take(&mut self, line: &Line, id: u32) -> Result<()> {
-        let dir = self.takes_dir(line);
-        let trash = self.export_root.join(".trash").join(&self.resource_dir);
-        std::fs::create_dir_all(&trash)?;
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        for ext in ["wav", "json"] {
-            let src = dir.join(format!("{id:03}.{ext}"));
-            if src.is_file() {
-                std::fs::rename(&src, trash.join(format!("{stamp}_{}_take{id:03}.{ext}", line.name)))?;
-            }
-        }
-        Ok(())
+        let res = self.resource_path(line);
+        self.store.trash_take(&res, id)
     }
 
     pub fn note(&self, line: &Line) -> &str {
-        self.state.notes.get(&self.resource_path(line)).map_or("", String::as_str)
+        self.store.note(&self.resource_path(line))
     }
 
     /// Пустая заметка удаляется.
     pub fn set_note(&mut self, line: &Line, note: &str) -> Result<()> {
-        let key = self.resource_path(line);
-        let note = note.trim();
-        let changed = if note.is_empty() {
-            self.state.notes.remove(&key).is_some()
-        } else {
-            self.state.notes.insert(key, note.to_owned()).as_deref() != Some(note)
-        };
-        if changed { self.save_state() } else { Ok(()) }
-    }
-
-    fn save_state(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.export_root)?;
-        std::fs::write(self.export_root.join(STATE_FILE), serde_json::to_vec_pretty(&self.state)?)?;
-        Ok(())
+        let res = self.resource_path(line);
+        self.store.set_note(&res, note)
     }
 
     /// Переносит мою фразу (и её wav) в `export/.trash`, ничего не удаляя насовсем.
     pub fn trash(&mut self, line: &Line) -> Result<()> {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let trash_dir = self.export_root.join(".trash").join(&self.resource_dir);
-        std::fs::create_dir_all(&trash_dir)?;
-        for src in [self.export_mp3(line), self.raw_wav(line)] {
-            if src.is_file() {
-                let name = src.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-                std::fs::rename(&src, trash_dir.join(format!("{stamp}_{name}")))
-                    .with_context(|| format!("не перенёсся в корзину {}", src.display()))?;
-            }
-        }
+        let res = self.resource_path(line);
+        self.store.trash(&res)?;
         self.recorded.remove(&line.name);
-        self.set_trim(line, None)?;
-        self.set_processing(line, crate::process::Settings::default())?;
-        self.set_redo(line, false)
+        Ok(())
     }
 }
 
