@@ -1,13 +1,13 @@
-//! Вкладка «Настройки»: игра и язык озвучки, папки, интерфейс, микрофон.
+//! Вкладка «Настройки»: игра и язык озвучки, папки, интерфейс, микрофон, «О программе».
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use dota_revoice::game;
+use dota_revoice::{game, update};
 use eframe::egui::{self, Align, Layout, RichText, vec2};
 
 use super::theme::{self, AMBER, BG_DEEP, FAINT, GOLD, GREEN, MUTED, RED, TEXT, icon};
-use super::{App, find_dota, open_folder, reveal};
+use super::{App, dota_status, find_dota, open_folder, open_url, reveal};
 use crate::config::{Config, UiLanguage};
 use dota_revoice::{tr, trf};
 
@@ -59,6 +59,8 @@ impl App {
                     self.interface_card(&mut cols[0]);
                     self.recording_card(&mut cols[1]);
                 });
+                ui.add_space(10.0);
+                self.about_card(ui);
             });
         });
     }
@@ -126,6 +128,10 @@ impl App {
             {
                 open_folder(&dir);
             }
+            ui.horizontal(|ui| {
+                label_cell(ui, tr!("Сейчас в игре", "In the game now"));
+                ui.label(RichText::new(dota_status(Some(&dota))).size(12.0).color(TEXT));
+            });
         });
     }
 
@@ -327,6 +333,55 @@ impl App {
                 self.config.save();
             }
             ui.label(theme::small(tr!("Обрезка, громкость, шумодав и отсчёт — чипами на экране записи.", "Trim, loudness, noise reduction and countdown are chips on the Record screen.")));
+        });
+    }
+
+    /// «О программе»: версия и обновления, автор, лицензия, ссылки на GitHub.
+    fn about_card(&mut self, ui: &mut egui::Ui) {
+        theme::card(ui, |ui| {
+            card_title(ui, icon::INFO, tr!("О программе", "About"));
+            ui.horizontal(|ui| {
+                ui.label(theme::title(concat!("Dota Revoice ", env!("CARGO_PKG_VERSION")), 15.0));
+                ui.add_space(4.0);
+                match (&self.latest, self.update_rx.is_some()) {
+                    (_, true) => {
+                        ui.spinner();
+                        ui.label(theme::small(tr!("проверяю обновления…", "checking for updates…")));
+                    }
+                    (Some(Some(release)), false) => {
+                        theme::pill(ui, &trf!("вышла {}", "{} is out", release.version), GOLD);
+                        if ui.add(theme::primary(trf!("{}  Скачать", "{}  Download", icon::DOWNLOAD_SIMPLE))).clicked() {
+                            open_url(&release.url);
+                        }
+                    }
+                    (Some(None), false) => theme::pill(ui, tr!("последняя версия", "up to date"), GREEN),
+                    (None, false) => {
+                        if theme::ghost(ui, true, trf!("{}  Проверить обновления", "{}  Check for updates", icon::ARROWS_CLOCKWISE)).clicked() {
+                            let ctx = ui.ctx().clone();
+                            self.start_update_check(&ctx);
+                        }
+                    }
+                }
+            });
+            ui.label(theme::small(tr!(
+                "Любительская переозвучка героев Dota 2. Фанатский проект, не связан с Valve.",
+                "Amateur re-voicing of Dota 2 heroes. A fan project, not affiliated with Valve."
+            )));
+            ui.label(theme::small(tr!("Автор — BasteArima · лицензия GPL-3.0, исходный код открыт", "By BasteArima · GPL-3.0 license, open source")));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                let repo = format!("https://github.com/{}", update::REPO);
+                let links = [
+                    (icon::GITHUB_LOGO, format!("github.com/{}", update::REPO), repo.clone()),
+                    (icon::BUG, tr!("Сообщить о проблеме", "Report a problem").to_owned(), format!("{repo}/issues")),
+                    (icon::TAG, tr!("Все версии", "All releases").to_owned(), format!("{repo}/releases")),
+                ];
+                for (glyph, text, url) in links {
+                    if theme::ghost_colored(ui, true, format!("{glyph}  {text}"), GOLD).on_hover_text(&url).clicked() {
+                        open_url(&url);
+                    }
+                }
+            });
         });
     }
 

@@ -33,6 +33,8 @@ const MIN_TAKE_SECS: f32 = 0.2;
 /// Как часто перепроверять игру: Steam мог обновить Доту, пока программа открыта.
 const GAME_CHECK: Duration = Duration::from_secs(5);
 const COMPARE_GAP_SECS: f32 = 0.4;
+/// Сколько секунд висит обычное сообщение (плюс время на чтение длинного текста).
+const TOAST_SECS: f32 = 3.5;
 /// Минимальная длина обрезанной фразы.
 const MIN_TRIM_SAMPLES: usize = audio::RATE as usize / 10;
 
@@ -116,15 +118,20 @@ pub struct App {
     alert: Option<install::Alert>,
     game_checked: Option<Instant>,
     /// Ответ GitHub о новой версии (проверяется в фоне при запуске).
-    update_rx: Option<mpsc::Receiver<update::Release>>,
+    update_rx: Option<mpsc::Receiver<Option<update::Release>>>,
+    /// Новая версия для баннера (его можно скрыть до следующего запуска).
     update: Option<update::Release>,
+    /// Что ответил GitHub: `Some(None)` — у меня последняя версия, `None` — ещё не знаем.
+    latest: Option<Option<update::Release>>,
     player: Option<Player>,
     recorder: Option<Recorder>,
     input_devices: Vec<String>,
     level: f32,
     clipped: bool,
 
+    /// Последнее сообщение — всплывает снизу (`toast`).
     message: Option<Message>,
+    message_at: Option<Instant>,
     /// Подгонка громкости всех фраз героя: идёт в фоне или ждёт подтверждения.
     match_all: Option<loudness::MatchAll>,
     build: BuildState,
@@ -160,6 +167,8 @@ impl App {
             alert: None,
             game_checked: None,
             update_rx: None,
+            latest: None,
+            message_at: None,
             update: None,
             player: None,
             recorder: None,
@@ -205,10 +214,12 @@ impl App {
 
     fn info(&mut self, text: impl Into<String>) {
         self.message = Some(Message::Info(text.into()));
+        self.message_at = Some(Instant::now());
     }
 
     fn error(&mut self, text: impl Into<String>) {
         self.message = Some(Message::Error(text.into()));
+        self.message_at = Some(Instant::now());
     }
 
     fn open_recorder(&mut self, name: Option<String>) {
@@ -882,7 +893,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            if let Ok(Some(release)) = update::check() {
+            if let Ok(release) = update::check() {
                 let _ = tx.send(release);
                 ctx.request_repaint();
             }
@@ -955,19 +966,50 @@ impl App {
         });
     }
 
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        // Статус Доты справа целиком, сообщение слева обрезается по ширине.
-        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-            ui.label(theme::small(dota_status(self.dota.as_ref())));
-            ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
-                let text = match &self.message {
-                    Some(Message::Info(t)) => theme::small(t.as_str()),
-                    Some(Message::Error(t)) => RichText::new(t.as_str()).size(12.0).color(RED),
-                    None => RichText::new(""),
-                };
-                ui.add(egui::Label::new(text).truncate());
+    /// Сообщение о последнем действии — плашка снизу по центру. Обычное гаснет само
+    /// (чем длиннее текст, тем позже), ошибка висит, пока её не закроют.
+    fn toast(&mut self, ctx: &egui::Context) {
+        let Some(message) = &self.message else { return };
+        let (text, is_error) = match message {
+            Message::Info(t) => (t.clone(), false),
+            Message::Error(t) => (t.clone(), true),
+        };
+        let age = self.message_at.map_or(0.0, |t| t.elapsed().as_secs_f32());
+        let life = TOAST_SECS + text.chars().count() as f32 / 40.0;
+        if !is_error && age > life {
+            self.message = None;
+            return;
+        }
+        let mut close = false;
+        egui::Area::new(egui::Id::new("toast"))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -18.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                // Последние полсекунды плавно гаснет.
+                if !is_error {
+                    ui.multiply_opacity(((life - age) / 0.5).clamp(0.0, 1.0));
+                }
+                egui::Frame::default()
+                    .fill(PANEL)
+                    .stroke(egui::Stroke::new(1.0_f32, if is_error { RED.gamma_multiply(0.7) } else { theme::LINE }))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(14, 8))
+                    .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: egui::Color32::from_black_alpha(120) })
+                    .show(ui, |ui| {
+                        ui.set_max_width(640.0);
+                        ui.horizontal(|ui| {
+                            let (glyph, color) = if is_error { (icon::WARNING, RED) } else { (icon::CHECK_CIRCLE, theme::GREEN) };
+                            ui.label(RichText::new(glyph).size(16.0).color(color));
+                            ui.add(egui::Label::new(RichText::new(text).size(13.0).color(theme::TEXT)).wrap());
+                            if theme::ghost(ui, true, icon::X).on_hover_text(tr!("Закрыть", "Close")).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
             });
-        });
+        if close {
+            self.message = None;
+        }
     }
 }
 
@@ -977,7 +1019,8 @@ impl eframe::App for App {
         if let Some(rx) = &self.update_rx
             && let Ok(release) = rx.try_recv()
         {
-            self.update = Some(release);
+            self.update.clone_from(&release);
+            self.latest = Some(release);
             self.update_rx = None;
         }
         self.handle_keys(ctx);
@@ -1012,9 +1055,6 @@ impl eframe::App for App {
                 .inner_margin(egui::Margin::symmetric(16, 8));
             egui::TopBottomPanel::top("update").frame(frame).show(ctx, |ui| self.update_banner(ui));
         }
-        egui::TopBottomPanel::bottom("status")
-            .frame(egui::Frame::side_top_panel(&ctx.style()).fill(PANEL).inner_margin(egui::Margin::symmetric(14, 5)))
-            .show(ctx, |ui| self.status_bar(ui));
         match self.screen {
             Screen::Record => {
                 egui::SidePanel::left("lines")
@@ -1048,6 +1088,8 @@ impl eframe::App for App {
                     });
             }
         }
+
+        self.toast(ctx);
 
         // Анимация волны, индикатора и кнопки записи; в покое — редкая перерисовка.
         let busy = self.player.as_ref().is_some_and(|p| p.now_playing().is_some())
