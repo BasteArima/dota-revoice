@@ -23,8 +23,9 @@ that the game loads instead of Valve's voice-over.
 - a hero's lines grouped by category, with search and notes on lines;
 - waveforms of the original and your version on the same scale, "original → mine" comparison;
 - microphone recording: a 3-2-1 countdown or "listen to the original first";
-- silence trimming (automatic or by hand on the waveform), loudness matched to the original (LUFS),
-  noise reduction, voice pitch, takes — all lossless, the source recording is never changed;
+- silence trimming (automatic or by hand on the waveform), loudness matched to the original (LUFS) —
+  for one line or for all of the hero's lines at once, a loudness slider, noise reduction, voice pitch,
+  takes — all lossless, the source recording is never changed;
 - building the pack, installing it into the game and launching Dota in three steps; the mod
   can be turned off and back on with a single switch, no rebuild needed;
 - settings: where the game is, which voice-over you're replacing, where files are stored;

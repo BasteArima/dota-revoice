@@ -1,6 +1,7 @@
 //! Экран «Запись»: список фраз слева, оригинал и моя версия справа.
 
 use dota_revoice::audio::{self, Track};
+use dota_revoice::process;
 use dota_revoice::project::{self, Status};
 use eframe::egui::{self, Align, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
@@ -467,10 +468,9 @@ impl App {
         resp
     }
 
-    /// Инструменты для моей версии: две подписанные строки — «Обрезка» и «Звук».
+    /// Инструменты для моей версии: подписанные строки «Обрезка», «Громкость» и «Звук».
     fn edit_tools(&mut self, ui: &mut egui::Ui) {
-        // Сетка: подписи слева, в каждой колонке кнопки одной ширины,
-        // подсказка обрезки и тон — в одной последней колонке.
+        // Сетка: подписи слева, в каждой колонке кнопки одной ширины, подсказки — в последней.
         const MAIN: egui::Vec2 = vec2(236.0, 30.0);
         const SECOND: egui::Vec2 = vec2(136.0, 30.0);
         let trimmed = self.trim != (0, self.full_len());
@@ -481,6 +481,10 @@ impl App {
         ui.add_space(2.0);
         ui.separator();
         ui.add_space(2.0);
+        // Пока подгоняется громкость всех фраз, текущую не трогаем — её файл тоже перепишется.
+        if self.match_all_running() {
+            ui.disable();
+        }
         egui::Grid::new("edit_tools").num_columns(4).spacing([10.0, 8.0]).show(ui, |ui| {
             label(ui, icon::SCISSORS, tr!("Обрезка", "Trim"));
             if ui.add_sized(MAIN, theme::tool(tr!("Убрать тишину по краям", "Trim silence at the edges")).shortcut_text("T")).clicked() {
@@ -497,18 +501,15 @@ impl App {
             ui.label(RichText::new(hint).size(12.0).color(FAINT));
             ui.end_row();
 
-            label(ui, icon::SPEAKER_HIGH, tr!("Звук", "Sound"));
-            if ui.add_sized(MAIN, theme::tool(tr!("Громкость как в оригинале", "Loudness like the original")).shortcut_text("L")).clicked() {
+            label(ui, icon::SPEAKER_HIGH, tr!("Громкость", "Loudness"));
+            self.gain_slider(ui, MAIN);
+            if ui.add_sized(SECOND, theme::tool(tr!("Как в оригинале", "Match original")).shortcut_text("L")).clicked() {
                 self.match_loudness();
             }
-            let denoise = self.fx.denoise;
-            let mut btn = theme::tool(trf!("{}  Шумодав", "{}  Denoise", if denoise { icon::CHECK_SQUARE } else { icon::SQUARE }));
-            if denoise {
-                btn = btn.fill(GOLD.gamma_multiply(0.12)).stroke(Stroke::new(1.0_f32, GOLD.gamma_multiply(0.6)));
-            }
-            if ui.add_sized(SECOND, btn).on_hover_text(tr!("Убрать шум комнаты и фон (RNNoise)", "Remove room noise and background (RNNoise)")).clicked() {
-                self.toggle_denoise();
-            }
+            ui.horizontal(|ui| self.match_all_controls(ui));
+            ui.end_row();
+
+            label(ui, icon::WAVEFORM, tr!("Звук", "Sound"));
             ui.horizontal(|ui| {
                 ui.label(RichText::new(tr!("Тон", "Pitch")).size(13.0).color(MUTED));
                 let pitch = self.fx.pitch;
@@ -525,7 +526,46 @@ impl App {
                     self.set_pitch(0.0);
                 }
             });
+            let denoise = self.fx.denoise;
+            let mut btn = theme::tool(trf!("{}  Шумодав", "{}  Denoise", if denoise { icon::CHECK_SQUARE } else { icon::SQUARE }));
+            if denoise {
+                btn = btn.fill(GOLD.gamma_multiply(0.12)).stroke(Stroke::new(1.0_f32, GOLD.gamma_multiply(0.6)));
+            }
+            if ui.add_sized(SECOND, btn).on_hover_text(tr!("Убрать шум комнаты и фон (RNNoise)", "Remove room noise and background (RNNoise)")).clicked() {
+                self.toggle_denoise();
+            }
             ui.end_row();
+        });
+    }
+
+    /// Ползунок усиления моей версии: пока тянут — слышно и видно сразу, файл пишется,
+    /// когда отпустили. Двойной клик — как в оригинале.
+    fn gain_slider(&mut self, ui: &mut egui::Ui, size: egui::Vec2) {
+        const VALUE_WIDTH: f32 = 62.0;
+        ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().slider_width = size.x - VALUE_WIDTH - ui.spacing().item_spacing.x;
+            // Дорожка темнее карточки, заполненная часть — золотом, как остальные включённые элементы.
+            let v = ui.visuals_mut();
+            v.widgets.inactive.bg_fill = BG_DEEP;
+            v.widgets.inactive.fg_stroke = Stroke::new(1.5_f32, TEXT);
+            v.selection.bg_fill = GOLD.gamma_multiply(0.75);
+            let mut gain = self.fx.gain_db;
+            let resp = ui
+                .add(egui::Slider::new(&mut gain, process::GAIN_RANGE).step_by(0.5).show_value(false).trailing_fill(true))
+                .on_hover_text(tr!("Тише ← → громче. Двойной клик — как в оригинале", "Quieter ← → louder. Double-click — match the original"));
+            let value = if gain == 0.0 { "0 dB".to_owned() } else { format!("{gain:+.1} dB") };
+            ui.add_sized(vec2(VALUE_WIDTH, size.y), egui::Label::new(RichText::new(value).size(13.0).color(if gain == 0.0 { MUTED } else { GOLD })));
+            if resp.double_clicked() {
+                self.match_loudness();
+                return;
+            }
+            if resp.changed() {
+                self.preview_gain(gain);
+            }
+            // Клик по дорожке или стрелки — сохраняем сразу, перетаскивание — когда отпустили.
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                self.commit_gain();
+            }
         });
     }
 

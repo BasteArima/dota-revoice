@@ -4,6 +4,7 @@
 
 mod build;
 mod heroes;
+mod loudness;
 mod record;
 mod settings;
 mod setup;
@@ -61,6 +62,14 @@ enum Pending {
     Original { ended: Option<f64> },
 }
 
+/// Кеш тяжёлой обработки (шумодав, тон) для одной записи.
+struct Shaped {
+    raw: Arc<Vec<f32>>,
+    denoise: bool,
+    pitch: f32,
+    samples: Vec<f32>,
+}
+
 /// Перетаскивание края обрезки: пока тянем, файл не пересохраняем.
 #[derive(Clone, Copy)]
 struct TrimDrag {
@@ -87,6 +96,8 @@ pub struct App {
     original: Option<Clip>,
     /// Моя запись как есть (исходный wav).
     mine_raw: Option<Arc<Vec<f32>>>,
+    /// Запись после шумодава и тона, до усиления: ползунок громкости пересчитывает только усиление.
+    shaped: Option<Shaped>,
     /// Запись целиком после шумодава и усиления — её показываем на волне.
     mine_full: Option<Clip>,
     /// Кусок `mine_full`, который идёт в игру, в сэмплах.
@@ -114,6 +125,8 @@ pub struct App {
     clipped: bool,
 
     message: Option<Message>,
+    /// Подгонка громкости всех фраз героя: идёт в фоне или ждёт подтверждения.
+    match_all: Option<loudness::MatchAll>,
     build: BuildState,
     settings: SettingsState,
     heroes: HeroesState,
@@ -135,6 +148,7 @@ impl App {
             scroll_to_selected: 0,
             original: None,
             mine_raw: None,
+            shaped: None,
             mine_full: None,
             trim: (0, 0),
             fx: Settings::default(),
@@ -153,6 +167,7 @@ impl App {
             level: 0.0,
             clipped: false,
             message: None,
+            match_all: None,
             build: BuildState::default(),
             settings: SettingsState::default(),
             heroes: HeroesState::default(),
@@ -308,9 +323,27 @@ impl App {
 
     /// Пересчитывает обработанную запись целиком и кусок для игры (без записи на диск).
     fn render_full(&mut self) {
-        let Some(raw) = &self.mine_raw else { return };
-        self.mine_full = Some(Clip::new(process::process(raw, self.fx)));
+        let Some(raw) = self.mine_raw.clone() else { return };
+        let fx = self.fx;
+        let cached = self.shaped.take().filter(|s| Arc::ptr_eq(&s.raw, &raw) && s.denoise == fx.denoise && s.pitch == fx.pitch);
+        let shaped = cached.unwrap_or_else(|| Shaped { samples: process::shape(&raw, fx), raw, denoise: fx.denoise, pitch: fx.pitch });
+        self.mine_full = Some(Clip::new(process::amplify(&shaped.samples, fx.gain_db)));
+        self.shaped = Some(shaped);
         self.render_cut();
+    }
+
+    /// Ползунок громкости: пока тянут — только пересчёт, файл пишем, когда отпустили.
+    fn preview_gain(&mut self, gain_db: f32) {
+        self.fx.gain_db = gain_db;
+        self.render_full();
+    }
+
+    fn commit_gain(&mut self) {
+        let gain = self.fx.gain_db;
+        match self.save_mine() {
+            Ok(()) => self.info(trf!("Громкость: {gain:+.1} dB", "Loudness: {gain:+.1} dB")),
+            Err(e) => self.error(trf!("Громкость не сохранилась: {e:#}", "Loudness wasn't saved: {e:#}")),
+        }
     }
 
     fn render_cut(&mut self) {
@@ -377,7 +410,8 @@ impl App {
         }
     }
 
-    /// Меняет обработку. Шумодав и тон влияют на громкость — если её подгоняли, подгоняем заново.
+    /// Меняет обработку. Шумодав и тон влияют на громкость — если её подгоняли, подгоняем
+    /// заново, сохраняя ручную поправку ползунком (насколько громче или тише оригинала).
     fn change_fx(&mut self, change: impl FnOnce(&mut Settings), done: &str) {
         if self.mine_raw.is_none() {
             return;
@@ -385,9 +419,11 @@ impl App {
         let mut fx = self.fx;
         change(&mut fx);
         let regain = fx.gain_db != 0.0;
+        let offset = if regain { self.measure_gain().map(|before| fx.gain_db - before) } else { None };
         self.fx = fx;
         if regain && let Some(gain) = self.measure_gain() {
-            fx.gain_db = gain;
+            let gain = gain + offset.unwrap_or(0.0);
+            fx.gain_db = gain.clamp(*process::GAIN_RANGE.start(), *process::GAIN_RANGE.end());
         }
         match self.apply_fx(fx) {
             Ok(()) => self.info(done),
@@ -552,6 +588,10 @@ impl App {
             self.error(tr!("Микрофон не открыт — выбери его в настройках", "No microphone open — pick one in the settings"));
             return;
         };
+        if self.match_all_running() && !rec.is_recording() {
+            self.info(tr!("Подожди: подгоняется громкость всех фраз", "Wait: loudness is being matched for all lines"));
+            return;
+        }
         if self.pending.take().is_some() {
             if let Some(p) = &self.player {
                 p.stop();
@@ -626,7 +666,15 @@ impl App {
         }
     }
 
+    fn match_all_running(&self) -> bool {
+        self.match_all.as_ref().is_some_and(|m| m.running())
+    }
+
     fn import_file(&mut self) {
+        if self.match_all_running() {
+            self.info(tr!("Подожди: подгоняется громкость всех фраз", "Wait: loudness is being matched for all lines"));
+            return;
+        }
         let Some(file) = rfd::FileDialog::new()
             .set_title(tr!("Выбери файл с фразой", "Pick a file with the line"))
             .add_filter(tr!("Аудио", "Audio"), &project::AUDIO_EXTENSIONS)
@@ -935,6 +983,7 @@ impl eframe::App for App {
         self.handle_keys(ctx);
         self.tick_pending(ctx);
         self.poll_build_tasks();
+        self.poll_match_all();
 
         if !self.config.setup_done {
             egui::CentralPanel::default()
@@ -1005,6 +1054,7 @@ impl eframe::App for App {
             || self.is_recording()
             || self.pending.is_some()
             || self.build.busy()
+            || self.match_all_running()
             || self.heroes.busy();
         ctx.request_repaint_after(if busy { Duration::from_millis(16) } else { Duration::from_millis(60) });
     }

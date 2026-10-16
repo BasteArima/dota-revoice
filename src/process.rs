@@ -23,8 +23,17 @@ pub struct Settings {
     pub pitch: f32,
 }
 
+/// Пределы усиления: и для ползунка, и для подгонки под оригинал.
+pub const GAIN_RANGE: std::ops::RangeInclusive<f32> = -20.0..=24.0;
+
 /// Вся запись целиком с шумодавом и усилением — её показываем на волне.
 pub fn process(raw: &[f32], s: Settings) -> Vec<f32> {
+    amplify(&shape(raw, s), s.gain_db)
+}
+
+/// Тяжёлая часть обработки — шумодав и тон. От усиления не зависит, поэтому
+/// её результат можно запомнить и менять громкость без пересчёта.
+pub fn shape(raw: &[f32], s: Settings) -> Vec<f32> {
     let mut out: Cow<[f32]> = Cow::Borrowed(raw);
     if s.denoise {
         out = Cow::Owned(denoise(raw));
@@ -32,13 +41,18 @@ pub fn process(raw: &[f32], s: Settings) -> Vec<f32> {
     if s.pitch.abs() > 0.01 {
         out = Cow::Owned(pitch_shift(&out, s.pitch));
     }
-    if s.gain_db.abs() > 0.01 {
-        let g = db_to_gain(s.gain_db);
-        let mut v: Vec<f32> = out.iter().map(|x| x * g).collect();
-        limit(&mut v);
-        out = Cow::Owned(v);
-    }
     out.into_owned()
+}
+
+/// Усиление с лимитером — быстро, годится на каждый кадр, пока тянут ползунок.
+pub fn amplify(shaped: &[f32], gain_db: f32) -> Vec<f32> {
+    if gain_db.abs() <= 0.01 {
+        return shaped.to_vec();
+    }
+    let g = db_to_gain(gain_db);
+    let mut v: Vec<f32> = shaped.iter().map(|x| x * g).collect();
+    limit(&mut v);
+    v
 }
 
 /// Кусок для игры: `range` в сэмплах, с затуханием по краям, если что-то отрезано.
@@ -148,12 +162,17 @@ pub fn loudness_lufs(samples: &[f32]) -> Option<f32> {
 /// Сколько dB добавить к записи, чтобы по громкости совпасть с оригиналом.
 /// Две итерации: лимитер немного «съедает» громкость, второй проход это добирает.
 pub fn match_gain(original: &[f32], raw: &[f32], s: Settings, range: (usize, usize)) -> Option<f32> {
+    match_gain_shaped(original, &shape(raw, s), range)
+}
+
+/// То же для записи, уже прошедшей шумодав и тон (`shape`).
+pub fn match_gain_shaped(original: &[f32], shaped: &[f32], range: (usize, usize)) -> Option<f32> {
     let target = loudness_lufs(original)?;
     let mut gain = 0.0f32;
     for _ in 0..2 {
-        let rendered = cut(&process(raw, Settings { gain_db: gain, ..s }), range);
+        let rendered = cut(&amplify(shaped, gain), range);
         gain += target - loudness_lufs(&rendered)?;
-        gain = gain.clamp(-20.0, 24.0);
+        gain = gain.clamp(*GAIN_RANGE.start(), *GAIN_RANGE.end());
     }
     Some((gain * 10.0).round() / 10.0)
 }
@@ -194,6 +213,14 @@ mod tests {
         let louder = cut(&process(&quiet, Settings { gain_db: gain, ..Settings::default() }), range);
         let diff = loudness_lufs(&louder).unwrap() - loudness_lufs(&original).unwrap();
         assert!(diff.abs() < 0.5, "разница {diff}");
+    }
+
+    #[test]
+    fn amplify_after_shape_is_the_same_as_process() {
+        let s = Settings { denoise: false, gain_db: 6.0, pitch: 2.0 };
+        let raw = tone(0.5, 0.3);
+        assert_eq!(amplify(&shape(&raw, s), s.gain_db), process(&raw, s));
+        assert_eq!(amplify(&raw, 0.0), raw);
     }
 
     #[test]
