@@ -840,8 +840,14 @@ impl App {
             if let Some(p) = &self.project {
                 let text = format!("{}  ·  {}/{}", self.hero_name(&p.hero), p.recorded_count(), p.lines.len());
                 let chip = egui::Button::new(RichText::new(text).color(theme::TEXT)).corner_radius(99);
-                if ui.add(chip).on_hover_text(tr!("К списку героев", "Back to the hero list")).clicked() {
-                    self.screen = Screen::Heroes;
+                // На «Героях» чип ведёт обратно к записи этого героя, с остальных вкладок — к списку.
+                let (target, hint) = if self.screen == Screen::Heroes {
+                    (Screen::Record, tr!("К фразам героя", "To the hero's lines"))
+                } else {
+                    (Screen::Heroes, tr!("К списку героев", "Back to the hero list"))
+                };
+                if ui.add(chip).on_hover_text(hint).clicked() {
+                    self.screen = target;
                 }
             } else if ui.add(theme::primary(trf!("{}  Выбрать героя", "{}  Pick a hero", icon::USERS_THREE))).clicked() {
                 self.screen = Screen::Heroes;

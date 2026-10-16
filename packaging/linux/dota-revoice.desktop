@@ -5,5 +5,7 @@ Comment=Переозвучка героев Dota 2
 Comment[en]=Re-voice Dota 2 heroes
 # Если положить программу в другое место — поправь путь.
 Exec=dota-revoice
+# Иконку dota-revoice.png положи в ~/.local/share/icons/ (или впиши сюда полный путь к ней).
+Icon=dota-revoice
 Terminal=false
 Categories=AudioVideo;Audio;Game;

@@ -58,7 +58,7 @@ jobs:
             target/x86_64-apple-darwin/release/dota_revoice
           sed "s/__VERSION__/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
           mkdir -p "$app/Contents/Resources"
-          cp LICENSE "$app/Contents/Resources/"
+          cp LICENSE packaging/macos/AppIcon.icns "$app/Contents/Resources/"
           # Подпись без сертификата: без неё macOS не запомнит разрешение на микрофон.
           codesign --force --deep --sign - "$app"
           ditto -c -k --keepParent "$app" "DotaRevoice-$GITHUB_REF_NAME-macos.zip"
@@ -85,6 +85,7 @@ jobs:
           cp target/release/dota_revoice "$dir/dota-revoice"
           strip "$dir/dota-revoice"
           cp README.md LICENSE packaging/linux/dota-revoice.desktop "$dir/"
+          cp assets/icon.png "$dir/dota-revoice.png"
           tar -C dist -czf "DotaRevoice-$GITHUB_REF_NAME-linux-x64.tar.gz" DotaRevoice
       - uses: actions/upload-artifact@v7
         with:

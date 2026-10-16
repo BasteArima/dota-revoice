@@ -61,7 +61,7 @@ either). When it asks for microphone access, allow it.
 It needs ALSA (`libasound2`) — a regular desktop already has it; PipeWire and PulseAudio
 work through it. Both regular and Flatpak Steam are detected. For the application menu
 there's a `dota-revoice.desktop` next to the binary — fix the path in it and put it into
-`~/.local/share/applications/`.
+`~/.local/share/applications/`, and put the `dota-revoice.png` icon into `~/.local/share/icons/`.
 
 On first launch the app asks three things: where Dota is (it usually finds it by itself),
 which voice-over you're replacing (the languages downloaded in Steam are listed) and where
