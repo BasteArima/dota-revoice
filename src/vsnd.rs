@@ -170,9 +170,76 @@ pub fn mp3_of(vsnd_c: &[u8]) -> anyhow::Result<&[u8]> {
     Ok(stream)
 }
 
+/// Несжатый звук: 16-битные сэмплы как есть.
+pub struct Pcm {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples: Vec<i16>,
+}
+
+/// Достаёт несжатый звук — так в игре лежат реплики немого героя (Марси). В блоке DATA
+/// (68 байт): частота (u16), тип (0 — PCM 16 бит), число каналов, …, со смещения 28 —
+/// размер потока в байтах. Поток идёт сразу за заголовком ресурса.
+pub fn pcm_of(vsnd_c: &[u8]) -> anyhow::Result<Pcm> {
+    let not_pcm = || anyhow::anyhow!(tr!("звук не в PCM 16 бит", "the sound isn't 16-bit PCM"));
+    let header = u32_at(vsnd_c, 0).ok_or_else(not_pcm)? as usize;
+    let data = block(vsnd_c, b"DATA").filter(|d| d.len() >= 32).ok_or_else(not_pcm)?;
+    let sample_rate = u16::from_le_bytes([data[0], data[1]]) as u32;
+    let (kind, channels) = (data[2], data[3] as u16);
+    anyhow::ensure!(kind == 0 && (1..=2).contains(&channels) && sample_rate > 0, not_pcm());
+    let size = u32_at(data, 28).ok_or_else(not_pcm)? as usize;
+    let stream = vsnd_c.get(header..header + size).ok_or_else(|| anyhow::anyhow!(tr!("обрезанный звук", "truncated sound")))?;
+    let samples = stream.as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b)).collect();
+    Ok(Pcm { sample_rate, channels, samples })
+}
+
+/// Блок ресурса по тегу: таблица блоков начинается со смещения из байт 8..12
+/// (от позиции 8), в ней по 12 байт — тег, смещение (от поля смещения) и размер.
+fn block<'a>(res: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
+    let table = 8 + u32_at(res, 8)? as usize;
+    let count = u32_at(res, 12)? as usize;
+    (0..count).find_map(|i| {
+        let pos = table + i * 12;
+        if res.get(pos..pos + 4)? != tag {
+            return None;
+        }
+        let start = pos + 4 + u32_at(res, pos + 4)? as usize;
+        res.get(start..start + u32_at(res, pos + 8)? as usize)
+    })
+}
+
+fn u32_at(b: &[u8], i: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Как у Марси: заголовок с одним блоком DATA на 68 байт, потом сэмплы.
+    #[test]
+    fn pcm_out_of_old_vsnd() {
+        let samples: [i16; 4] = [0, -15, 1000, -32768];
+        let mut f = Vec::new();
+        f.extend_from_slice(&96u32.to_le_bytes()); // размер заголовка
+        f.extend_from_slice(&[12, 0, 1, 0]); // версии
+        f.extend_from_slice(&8u32.to_le_bytes()); // таблица блоков — с позиции 16
+        f.extend_from_slice(&1u32.to_le_bytes());
+        f.extend_from_slice(b"DATA");
+        f.extend_from_slice(&8u32.to_le_bytes()); // данные блока — с позиции 28
+        f.extend_from_slice(&68u32.to_le_bytes());
+        let mut data = [0u8; 68];
+        data[..4].copy_from_slice(&[0x44, 0xAC, 0, 1]); // 44100 Гц, PCM16, моно
+        data[28..32].copy_from_slice(&8u32.to_le_bytes());
+        f.extend_from_slice(&data);
+        assert_eq!(f.len(), 96);
+        f.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+        let pcm = pcm_of(&f).unwrap();
+        assert_eq!((pcm.sample_rate, pcm.channels), (44100, 1));
+        assert_eq!(pcm.samples, samples);
+        assert!(mp3_of(&f).is_err());
+        assert!(pcm_of(&f[..100]).is_err(), "обрезанный поток");
+    }
 
     #[test]
     fn mp3_back_out_of_vsnd() {
@@ -182,6 +249,7 @@ mod tests {
         let f = build("sounds/vo/axe/axe_kill_01", &mp3);
         assert_eq!(mp3_of(&f).unwrap(), mp3.data.as_slice());
         assert!(mp3_of(&f[..f.len() - 500]).is_err(), "без потока");
+        assert!(pcm_of(&f).is_err(), "mp3 — не PCM");
     }
 
     fn u32_at(b: &[u8], at: usize) -> u32 {

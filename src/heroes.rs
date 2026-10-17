@@ -144,7 +144,7 @@ fn vo_entry(path: &str) -> Option<(&str, &str)> {
 pub fn extract_lines(voice_pak: &Path, vo: &str, out_dir: &Path) -> Result<usize> {
     let stamp = file_stamp(voice_pak);
     let marker = out_dir.join(".source");
-    let existing = count_mp3(out_dir);
+    let existing = count_audio(out_dir);
     if existing > 0 && std::fs::read_to_string(&marker).is_ok_and(|s| s == stamp) {
         return Ok(existing);
     }
@@ -157,10 +157,14 @@ pub fn extract_lines(voice_pak: &Path, vo: &str, out_dir: &Path) -> Result<usize
             continue;
         }
         let data = pak.read(path)?;
-        // Редкие звуки не в mp3 пропускаем — записать поверх них всё равно можно будет позже.
+        // Почти все фразы — mp3; у немой Марси звуки несжатые — их сохраняем в wav.
         if let Ok(mp3) = vsnd::mp3_of(&data) {
             let file = out_dir.join(format!("{name}.mp3"));
             std::fs::write(&file, mp3).with_context(|| trf!("не записывается {}", "can't write {}", file.display()))?;
+            n += 1;
+        } else if let Ok(pcm) = vsnd::pcm_of(&data) {
+            let file = out_dir.join(format!("{name}.wav"));
+            write_wav(&file, &pcm).with_context(|| trf!("не записывается {}", "can't write {}", file.display()))?;
             n += 1;
         }
     }
@@ -178,14 +182,34 @@ pub fn recorded_counts(export_root: &Path) -> HashMap<String, usize> {
         .collect()
 }
 
+/// Мои фразы в «Моих фразах» — всегда mp3.
 fn count_mp3(dir: &Path) -> usize {
+    count_files(dir, &["mp3"])
+}
+
+/// Сколько оригиналов уже распаковано: mp3, у Марси — wav.
+fn count_audio(dir: &Path) -> usize {
+    count_files(dir, &["mp3", "wav"])
+}
+
+fn count_files(dir: &Path, exts: &[&str]) -> usize {
     std::fs::read_dir(dir)
         .map(|it| {
             it.filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("mp3")))
+                .filter(|e| e.path().extension().is_some_and(|x| exts.iter().any(|ext| x.eq_ignore_ascii_case(ext))))
                 .count()
         })
         .unwrap_or(0)
+}
+
+fn write_wav(path: &Path, pcm: &vsnd::Pcm) -> Result<()> {
+    let spec = hound::WavSpec { channels: pcm.channels, sample_rate: pcm.sample_rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+    let mut w = hound::WavWriter::create(path, spec)?;
+    for &s in &pcm.samples {
+        w.write_sample(s)?;
+    }
+    w.finalize()?;
+    Ok(())
 }
 
 /// Путь (без `.off`: наше переключение не делает пак «другим») и время изменения.
