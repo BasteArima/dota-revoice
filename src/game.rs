@@ -52,7 +52,8 @@ impl DotaInstall {
         let dir = self.language_dir()?;
         let on = dir.join("pak01_dir.vpk");
         let off = dir.join("pak01_dir.vpk.off");
-        if on.is_file() {
+        // Под именем pak01_dir.vpk может лежать и наш пак — у оригинала Valve есть подпись.
+        if on.is_file() && crate::vpk::is_signed(&on) {
             Some(VoicePak { path: on, enabled: true })
         } else if off.is_file() {
             Some(VoicePak { path: off, enabled: false })
@@ -65,7 +66,7 @@ impl DotaInstall {
 #[derive(Debug, Clone)]
 pub struct VoicePak {
     pub path: PathBuf,
-    /// `true` — пак Valve включён и перекрывает наш `pak02`.
+    /// `true` — оригинал Valve лежит на месте как `pak01_dir.vpk`, нашего пака в игре нет.
     pub enabled: bool,
 }
 

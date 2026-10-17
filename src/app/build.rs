@@ -1,4 +1,5 @@
 //! Вкладка «Сборка и установка»: три шага с понятным статусом у каждого.
+//! Собирается свой `pak01_dir.vpk` (оглавление Valve + мои фразы), ставится — см. `install`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -139,7 +140,7 @@ impl App {
             self.build.summary = Some(match result {
                 Ok(s) => {
                     let mut text = trf!(
-                        "Собрано: твоих фраз {}, из озвучки игры {}, {:.0} МБ", "Built: {} of your lines, {} from the game's voice-over, {:.0} MB",
+                        "Собрано: твоих фраз {}, из озвучки игры {}, {:.1} МБ", "Built: {} of your lines, {} from the game's voice-over, {:.1} MB",
                         s.replaced + s.not_in_base.len(),
                         s.copied,
                         s.size_bytes as f64 / 1_048_576.0
@@ -194,28 +195,25 @@ impl App {
             valve_enabled: self.dota.as_ref().and_then(|d| d.voice_pak()).is_some_and(|v| v.enabled),
             has_changes: self.dota.as_ref().is_some_and(install::has_changes),
             dota_running: install::is_dota_running(),
-            valve_newer: self.build.use_base
-                && match (built, self.dota.as_ref().and_then(install::valve_pak_modified)) {
-                    (Some((_, built)), Some(valve)) => valve > built,
-                    _ => false,
-                },
+            valve_newer: self.build.use_base && built.is_some() && self.dota.as_ref().is_some_and(|d| install::built_outdated(d, &built_path)),
         });
     }
 
     fn start_build(&mut self, ctx: &egui::Context) {
         let (Some(p), Some(out)) = (&self.project, self.built_pak()) else { return };
-        let base = self.dota.as_ref().and_then(|d| d.voice_pak()).filter(|_| self.build.use_base).map(|v| v.path);
+        let base = self.dota.as_ref().and_then(install::valve_index).filter(|_| self.build.use_base);
         let progress = Arc::new(AtomicU32::new(0));
         let (tx, rx) = mpsc::channel();
         let export_root = p.export_root.clone();
         let (prog2, ctx2) = (progress.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let result = pack::collect_export(&export_root).and_then(|mine| {
-                pack::build(base.as_deref(), &mine, &out, |f| {
-                    prog2.store((f * 1000.0) as u32, Ordering::Relaxed);
-                    ctx2.request_repaint();
-                })
-            });
+            // Свой pak01_dir.vpk: оглавление Valve + мои фразы — собирается за секунды.
+            let result = pack::collect_export(&export_root).and_then(|mine| pack::build_overlay(base.as_deref(), &mine, &out));
+            if result.is_ok() {
+                // Полная копия озвучки от прежней версии программы больше не нужна.
+                let _ = std::fs::remove_file(out.with_file_name("pak02_dir.vpk"));
+            }
+            prog2.store(1000, Ordering::Relaxed);
             let _ = tx.send(result);
             ctx2.request_repaint();
         });
@@ -229,7 +227,7 @@ impl App {
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
             let result = match action {
-                GameAction::Install => install::Plan::for_install(&dota)
+                GameAction::Install => install::Plan::for_install(&dota, &built)
                     .and_then(|plan| install::install(&plan, &built))
                     .map(|()| tr!("Установлено. Запусти Доту — новые фразы подхватятся при старте", "Installed. Launch Dota — new lines load at startup").to_owned()),
                 GameAction::Enable => install::set_enabled(&dota, true)
@@ -311,14 +309,14 @@ impl App {
                 trf!("Твоих фраз: {}", "Your lines: {}", snap.mine)
             };
             if let Some((size, at)) = snap.built {
-                info += &trf!(" · пак {:.0} МБ, собран {}", " · pack {:.0} MB, built {}", size as f64 / 1_048_576.0, ago(at));
+                info += &trf!(" · пак {:.1} МБ, собран {}", " · pack {:.1} MB, built {}", size as f64 / 1_048_576.0, ago(at));
             }
             ui.label(theme::small(info));
             if snap.valve_newer {
                 ui.label(RichText::new(tr!("Steam обновил озвучку Valve после сборки — пересобери, чтобы в паке были свежие фразы игры.", "Steam updated Valve's voice-over after the build — rebuild to get the game's fresh lines into the pack.")).size(12.0).color(AMBER));
             }
 
-            if self.dota.as_ref().and_then(|d| d.voice_pak()).is_some() {
+            if self.dota.as_ref().and_then(install::valve_index).is_some() {
                 let text = trf!(
                     "{}  Остальные фразы взять из озвучки игры", "{}  Take the remaining lines from the game's voice-over",
                     if self.build.use_base { icon::CHECK_SQUARE } else { icon::SQUARE }
@@ -352,6 +350,7 @@ impl App {
                 ui.label(theme::title(tr!("Установить в игру", "Install into the game"), 15.0));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| match snap.mod_state {
                     ModState::Absent => theme::pill(ui, tr!("не установлено", "not installed"), MUTED),
+                    ModState::Legacy => theme::pill(ui, tr!("пак прежней версии", "pack from the previous version"), AMBER),
                     ModState::Disabled => theme::pill(ui, tr!("мод выключен", "mod off"), MUTED),
                     ModState::Enabled if snap.valve_enabled => theme::pill(ui, tr!("Steam вернул озвучку Valve", "Steam restored Valve's voice-over"), AMBER),
                     ModState::Enabled if snap.installed == Installed::Other => theme::pill(ui, tr!("в игре старая версия", "old version in the game"), AMBER),
@@ -374,8 +373,14 @@ impl App {
                 return;
             }
             match self.build.confirm {
-                None if snap.mod_state == ModState::Absent => {
-                    let can_install = snap.built.is_some();
+                None if matches!(snap.mod_state, ModState::Absent | ModState::Legacy) => {
+                    if snap.mod_state == ModState::Legacy {
+                        ui.label(RichText::new(tr!(
+                            "В игре пак прежней версии — копия всей озвучки на ~550 МБ. Собери и установи новый: он весит пару мегабайт, старый удалится.",
+                            "The game has a pack from the previous version — a ~550 MB copy of the whole voice-over. Build and install the new one: it weighs a couple of megabytes, the old one will be deleted."
+                        )).size(12.0).color(AMBER));
+                    }
+                    let can_install = snap.built.is_some() && !snap.valve_newer;
                     if ui.add_enabled(can_install, theme::primary(trf!("{}  Установить", "{}  Install", icon::DOWNLOAD_SIMPLE))).clicked() {
                         self.ask(GameAction::Install);
                     }
@@ -428,25 +433,29 @@ impl App {
     /// Что изменится в папке игры — и кнопки «сделать» / «отмена».
     fn confirm_box(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, dota: &game::DotaInstall, action: GameAction) {
         let valve_on = dota.voice_pak().is_some_and(|v| v.enabled);
+        let (on, off, valve_off) = (install::PAK_NAME, install::PAK_OFF, install::VALVE_OFF);
         let steps = match action {
-            GameAction::Install => install::Plan::for_install(dota).map(|p| p.describe()),
+            GameAction::Install => match self.built_pak() {
+                Some(built) => install::Plan::for_install(dota, &built).map(|p| p.describe()),
+                None => Ok(Vec::new()),
+            },
             GameAction::Enable => {
                 let mut steps = Vec::new();
-                if install::mod_state(dota) == ModState::Disabled {
-                    steps.push(trf!("Переименовать {} в {} — включить мой пак", "Rename {} to {} — turn my pack on", install::PAK_OFF, install::PAK_NAME));
-                }
                 if valve_on {
-                    steps.push(tr!("Переименовать pak01_dir.vpk в pak01_dir.vpk.off — отключить озвучку Valve", "Rename pak01_dir.vpk to pak01_dir.vpk.off — turn off Valve's voice-over").to_owned());
+                    steps.push(trf!("Переименовать {on} Valve в {valve_off} — оригинал остаётся рядом", "Rename Valve's {on} to {valve_off} — the original stays next to it"));
+                }
+                if install::mod_state(dota) == ModState::Disabled {
+                    steps.push(trf!("Переименовать {off} в {on} — включить мой пак", "Rename {off} to {on} — turn my pack on"));
                 }
                 Ok(steps)
             }
             GameAction::Disable => Ok(vec![
-                trf!("Переименовать {} в {} — мой пак остаётся в игре, но не грузится", "Rename {} to {} — my pack stays in the game but doesn't load", install::PAK_NAME, install::PAK_OFF),
-                tr!("Вернуть pak01_dir.vpk — озвучку Valve", "Restore pak01_dir.vpk — Valve's voice-over").to_owned(),
+                trf!("Переименовать мой {on} в {off} — пак остаётся в игре, но не грузится", "Rename my {on} to {off} — the pack stays in the game but doesn't load"),
+                trf!("Переименовать {valve_off} обратно в {on} — озвучка Valve", "Rename {valve_off} back to {on} — Valve's voice-over"),
             ]),
             GameAction::Rollback => Ok(vec![
-                trf!("Удалить наш пак ({}) из папки языка", "Delete our pack ({}) from the language folder", install::PAK_NAME),
-                tr!("Вернуть pak01_dir.vpk — озвучку Valve", "Restore pak01_dir.vpk — Valve's voice-over").to_owned(),
+                trf!("Удалить наш пак ({on} или {off}) из папки языка", "Delete our pack ({on} or {off}) from the language folder"),
+                trf!("Вернуть {valve_off} → {on} — озвучку Valve", "Restore {valve_off} → {on} — Valve's voice-over"),
             ]),
         };
         egui::Frame::default().fill(BG_DEEP).corner_radius(8).inner_margin(egui::Margin::same(10)).show(ui, |ui| {

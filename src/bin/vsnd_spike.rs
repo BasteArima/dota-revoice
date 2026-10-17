@@ -1,9 +1,12 @@
 //! Утилита для отладки: собрать VPK из пар «путь в игре = mp3-файл».
 //!
-//! vsnd_spike [--base <pak01_dir.vpk>] <out.vpk> <путь_в_игре>=<файл.mp3> ...
+//! vsnd_spike [--base <pak01_dir.vpk>] [--overlay] <out.vpk> [--export <папка>] <путь_в_игре>=<файл.mp3> ...
 //!
 //! С `--base` в пак сначала копируется всё из указанного пака
 //! (например, русская озвучка), а перечисленные файлы подменяются.
+//! С `--overlay` ничего не копируется: получается `pak01_dir.vpk` с оглавлением
+//! базового пака и своими фразами внутри, остальное игра берёт из томов Valve.
+//! `--export` добавляет все mp3 из папки «Мои фразы».
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use dota_revoice::pack;
 
-const USAGE: &str = "использование: vsnd_spike [--base <pak01_dir.vpk>] <out.vpk> <путь_в_игре>=<файл.mp3> ...\n\
+const USAGE: &str = "использование: vsnd_spike [--base <pak01_dir.vpk>] [--overlay] <out.vpk> [--export <папка>] <путь_в_игре>=<файл.mp3> ...\n\
                      пример: vsnd_spike out/pak02_dir.vpk sounds/vo/bounty_hunter/bount_kill_01=kill.mp3";
 
 fn main() -> Result<()> {
@@ -21,11 +24,26 @@ fn main() -> Result<()> {
         Some(_) => bail!("после --base нужен путь к паку\n{USAGE}"),
         None => None,
     };
-    let Some((out_path, pairs)) = args.split_first().filter(|(_, p)| !p.is_empty()) else {
+    let overlay = match args.iter().position(|a| a == "--overlay") {
+        Some(i) => {
+            args.remove(i);
+            true
+        }
+        None => false,
+    };
+    let export = match args.iter().position(|a| a == "--export") {
+        Some(i) if i + 1 < args.len() => Some(args.drain(i..i + 2).nth(1).unwrap()),
+        Some(_) => bail!("после --export нужна папка\n{USAGE}"),
+        None => None,
+    };
+    let Some((out_path, pairs)) = args.split_first().filter(|(_, p)| !p.is_empty() || export.is_some()) else {
         bail!("{USAGE}");
     };
 
-    let mut replacements = BTreeMap::new();
+    let mut replacements = match &export {
+        Some(dir) => pack::collect_export(Path::new(dir))?,
+        None => BTreeMap::new(),
+    };
     for pair in pairs {
         let (game_path, file) = pair
             .split_once('=')
@@ -34,7 +52,10 @@ fn main() -> Result<()> {
         replacements.insert(resource, PathBuf::from(file));
     }
 
-    let summary = pack::build(base.as_deref().map(Path::new), &replacements, Path::new(out_path), |_| {})?;
+    let summary = match (overlay, base.as_deref()) {
+        (true, base) => pack::build_overlay(base.map(Path::new), &replacements, Path::new(out_path))?,
+        (false, base) => pack::build(base.map(Path::new), &replacements, Path::new(out_path), |_| {})?,
+    };
     for p in &summary.not_in_base {
         eprintln!("  внимание: в базовом паке нет {p} — это новый файл, а не замена");
     }

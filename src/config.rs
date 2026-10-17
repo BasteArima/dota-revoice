@@ -132,7 +132,7 @@ impl Config {
         self.export_dir.clone().unwrap_or_else(|| self.library_dir().join("export"))
     }
 
-    /// Куда собирается `pak02_dir.vpk`.
+    /// Куда собирается наш `pak01_dir.vpk`.
     pub fn build_root(&self) -> PathBuf {
         self.build_dir.clone().unwrap_or_else(|| self.export_root().join("build"))
     }

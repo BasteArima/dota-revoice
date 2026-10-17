@@ -1141,6 +1141,7 @@ fn dota_status(dota: Option<&DotaInstall>) -> String {
         (None, _) => trf!("Дота · озвучка {lang} · пак озвучки не скачан", "Dota · {lang} voice-over · voice pack not downloaded"),
         (Some(v), install::ModState::Enabled) if !v.enabled => trf!("Дота · озвучка {lang} · работает наш пак", "Dota · {lang} voice-over · our pack is active"),
         (Some(_), install::ModState::Disabled) => trf!("Дота · озвучка {lang} · мод выключен", "Dota · {lang} voice-over · mod off"),
+        (Some(v), install::ModState::Legacy) if !v.enabled => trf!("Дота · озвучка {lang} · работает пак прежней версии", "Dota · {lang} voice-over · the previous version's pack is active"),
         (Some(_), _) => trf!("Дота · озвучка {lang} · пак Valve включён", "Dota · {lang} voice-over · Valve pack on"),
     }
 }

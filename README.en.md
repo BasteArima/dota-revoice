@@ -113,19 +113,22 @@ After importing, rebuild and install the pack.
 **Build & install** → **Install into the game**:
 
 - the **My voice-over / Valve voice-over** switch — the disabled pack stays in the game
-  (`pak02_dir.vpk.off`) and turns back on instantly, no rebuild needed;
+  (`pak01_dir.vpk.revoice`) and turns back on instantly, no rebuild needed;
 - **Remove from game** — the app deletes its pack and brings back Valve's voice-over. Steam's
   "Verify integrity of game files" does the same.
 
 ## How it works
 
-The voice-over lives in `game/dota_<language>/pak01_dir.vpk` (+ the `pak01_000…` volumes).
-Within one folder the game reads packs in numeric order, so `pak01` would override any mod.
-The app builds `pak02_dir.vpk` — all of Valve's voice-over plus your lines — and renames
-`pak01_dir.vpk` to `pak01_dir.vpk.off`. The `pak01_00N.vpk` volumes are left untouched.
+The voice-over lives in `game/dota_<language>/`: `pak01_dir.vpk` is the index (about 1 MB),
+the lines themselves are in the `pak01_000…005.vpk` volumes. Within one folder the game reads
+packs in numeric order, so `pak01` would override any mod. The app builds its own `pak01_dir.vpk`:
+a copy of Valve's index where everyone else's lines still point into Valve's volumes and yours
+are stored right in the file. It weighs a couple of megabytes rather than the whole voice-over.
+While the mod is on, Valve's original sits next to it as `pak01_dir.vpk.off`; the volumes are
+left untouched.
 
-If Steam brings back `pak01_dir.vpk` after an update, the app shows a warning and offers
-to reinstall. The language folder is picked by the game's voice-over setting: with English
+If Steam puts its own `pak01_dir.vpk` back after an update, the app shows a warning and asks you
+to rebuild the pack — the old one points into the old volumes. The language folder is picked by the game's voice-over setting: with English
 voice-over, mods from a language folder don't load — the app warns about that too.
 
 ## Building from source

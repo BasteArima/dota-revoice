@@ -62,49 +62,133 @@ impl VpkBuilder {
 
     /// Пишет пак потоком, не собирая его целиком в памяти.
     pub fn write_to(&self, w: impl Write) -> io::Result<()> {
-        let mut tree = Vec::new();
-        let mut data_len = 0usize;
-        for (ext, dirs) in &self.tree {
-            push_cstr(&mut tree, ext);
-            for (dir, files) in dirs {
-                push_cstr(&mut tree, dir);
-                for (name, bytes) in files {
-                    push_cstr(&mut tree, name);
-                    tree.extend_from_slice(&crc32fast::hash(bytes).to_le_bytes());
-                    tree.extend_from_slice(&0u16.to_le_bytes()); // preload
-                    tree.extend_from_slice(&EMBEDDED_ARCHIVE.to_le_bytes());
-                    tree.extend_from_slice(&(data_len as u32).to_le_bytes());
-                    tree.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                    tree.extend_from_slice(&ENTRY_TERMINATOR.to_le_bytes());
-                    data_len += bytes.len();
+        let tree: Tree = self
+            .tree
+            .iter()
+            .map(|(ext, dirs)| {
+                let dirs = dirs.iter().map(|(dir, files)| {
+                    (dir.as_str(), files.iter().map(|(name, bytes)| (name.as_str(), Item::Inline(bytes))).collect())
+                });
+                (ext.as_str(), dirs.collect())
+            })
+            .collect();
+        write_tree(&tree, w)
+    }
+}
+
+/// Файл в оглавлении: данные внутри нашего файла или ссылка в том Valve (`pak01_00N.vpk`).
+enum Item<'a> {
+    Inline(&'a [u8]),
+    External(&'a VpkEntry),
+}
+
+/// Расширение → каталог → имя → файл.
+type Tree<'a> = BTreeMap<&'a str, BTreeMap<&'a str, BTreeMap<&'a str, Item<'a>>>>;
+
+/// Наш пак поверх томов Valve: оглавление `base` как есть — его файлы остаются в
+/// `pak01_00N.vpk`, игра находит их по имени нашего файла (он тоже `pak01_dir.vpk`),
+/// а `own` — замены и новые файлы — лежат прямо в нашем файле. Весит как оглавление
+/// Valve плюс свои фразы, а не как вся озвучка.
+pub fn write_overlay(base: Option<&VpkReader>, own: &BTreeMap<String, Vec<u8>>, w: impl Write) -> Result<()> {
+    let empty = BTreeMap::new();
+    let entries = base.map_or(&empty, VpkReader::entries);
+    // Данные, которые Valve хранит в самом `_dir`, к нам не попадут сами — переносим их внутрь.
+    let mut embedded = BTreeMap::new();
+    for (path, e) in entries {
+        if e.archive == EMBEDDED_ARCHIVE
+            && !own.contains_key(path)
+            && let Some(base) = base
+        {
+            embedded.insert(path.as_str(), base.read(path)?);
+        }
+    }
+    let mut tree: Tree = BTreeMap::new();
+    for (path, e) in entries {
+        match embedded.get(path.as_str()) {
+            Some(bytes) => put(&mut tree, path, Item::Inline(bytes)),
+            None if !own.contains_key(path) => put(&mut tree, path, Item::External(e)),
+            None => {}
+        }
+    }
+    for (path, bytes) in own {
+        put(&mut tree, path, Item::Inline(bytes));
+    }
+    write_tree(&tree, w)?;
+    Ok(())
+}
+
+/// Пак Valve: подписан и хранит MD5 своих томов. Наши паки — без подписи и без этой таблицы,
+/// поэтому свой `pak01_dir.vpk` отличаем от файла Valve по одному заголовку.
+pub fn is_signed(path: &Path) -> bool {
+    let mut header = [0u8; HEADER_SIZE];
+    let read = File::open(path).and_then(|mut f| f.read_exact(&mut header));
+    let field = |i: usize| u32::from_le_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
+    read.is_ok() && field(0) == SIGNATURE && (field(4) > 0 || field(6) > 0)
+}
+
+/// `sounds/vo/axe/axe_kill_01.vsnd_c` → расширение, каталог, имя (пустые у Valve — пробел).
+fn put<'a>(tree: &mut Tree<'a>, path: &'a str, item: Item<'a>) {
+    let (dir, file) = path.rsplit_once('/').unwrap_or((" ", path));
+    let (name, ext) = file.rsplit_once('.').unwrap_or((file, " "));
+    tree.entry(ext).or_default().entry(dir).or_default().insert(name, item);
+}
+
+fn write_tree(items: &Tree, w: impl Write) -> io::Result<()> {
+    let mut tree = Vec::new();
+    let mut data_len = 0usize;
+    for (ext, dirs) in items {
+        push_cstr(&mut tree, ext);
+        for (dir, files) in dirs {
+            push_cstr(&mut tree, dir);
+            for (name, item) in files {
+                push_cstr(&mut tree, name);
+                match item {
+                    Item::Inline(bytes) => {
+                        tree.extend_from_slice(&crc32fast::hash(bytes).to_le_bytes());
+                        tree.extend_from_slice(&0u16.to_le_bytes()); // preload
+                        tree.extend_from_slice(&EMBEDDED_ARCHIVE.to_le_bytes());
+                        tree.extend_from_slice(&(data_len as u32).to_le_bytes());
+                        tree.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                        tree.extend_from_slice(&ENTRY_TERMINATOR.to_le_bytes());
+                        data_len += bytes.len();
+                    }
+                    Item::External(e) => {
+                        tree.extend_from_slice(&e.crc.to_le_bytes());
+                        tree.extend_from_slice(&(e.preload.len() as u16).to_le_bytes());
+                        tree.extend_from_slice(&e.archive.to_le_bytes());
+                        tree.extend_from_slice(&e.offset.to_le_bytes());
+                        tree.extend_from_slice(&e.len.to_le_bytes());
+                        tree.extend_from_slice(&ENTRY_TERMINATOR.to_le_bytes());
+                        tree.extend_from_slice(&e.preload);
+                    }
                 }
-                tree.push(0);
             }
             tree.push(0);
         }
         tree.push(0);
-        if data_len > u32::MAX as usize {
-            return Err(io::Error::other(tr!("пак больше 4 ГБ не поместится в один файл", "a pack over 4 GB won't fit into one file")));
-        }
-
-        // MD5 «всего файла» считаем на лету по мере записи.
-        let mut w = HashingWriter { inner: w, md5: Md5::new() };
-        for v in [SIGNATURE, VERSION, tree.len() as u32, data_len as u32, 0, 48, 0] {
-            w.write_all(&v.to_le_bytes())?;
-        }
-        w.write_all(&tree)?;
-        for files in self.tree.values().flat_map(|d| d.values()) {
-            for bytes in files.values() {
-                w.write_all(bytes)?;
-            }
-        }
-        // MD5 дерева, MD5 (пустой) таблицы архивов, MD5 всего, что выше.
-        w.write_all(&Md5::digest(&tree))?;
-        w.write_all(&Md5::digest([]))?;
-        let whole = w.md5.finalize();
-        w.inner.write_all(&whole)?;
-        w.inner.flush()
     }
+    tree.push(0);
+    if data_len > u32::MAX as usize {
+        return Err(io::Error::other(tr!("пак больше 4 ГБ не поместится в один файл", "a pack over 4 GB won't fit into one file")));
+    }
+
+    // MD5 «всего файла» считаем на лету по мере записи.
+    let mut w = HashingWriter { inner: w, md5: Md5::new() };
+    for v in [SIGNATURE, VERSION, tree.len() as u32, data_len as u32, 0, 48, 0] {
+        w.write_all(&v.to_le_bytes())?;
+    }
+    w.write_all(&tree)?;
+    for item in items.values().flat_map(|d| d.values()).flat_map(|f| f.values()) {
+        if let Item::Inline(bytes) = item {
+            w.write_all(bytes)?;
+        }
+    }
+    // MD5 дерева, MD5 (пустой) таблицы архивов, MD5 всего, что выше.
+    w.write_all(&Md5::digest(&tree))?;
+    w.write_all(&Md5::digest([]))?;
+    let whole = w.md5.finalize();
+    w.inner.write_all(&whole)?;
+    w.inner.flush()
 }
 
 struct HashingWriter<W> {
@@ -290,6 +374,40 @@ mod tests {
         assert_eq!(out.len(), 28 + tree_size + 3 + 48);
         let md5_at = out.len() - 48;
         assert_eq!(&out[out.len() - 16..], Md5::digest(&out[..md5_at + 32]).as_slice());
+    }
+
+    /// Как у Valve: оглавление в `pak01_dir.vpk`, данные — в томе `pak01_000.vpk`.
+    /// Надстройка с тем же именем рядом с томом читает и свои файлы, и чужие из тома.
+    #[test]
+    fn overlay_references_valve_volumes() {
+        let dir = std::env::temp_dir().join(format!("vpk_overlay_{}", std::process::id()));
+        let (valve, ours) = (dir.join("valve"), dir.join("ours"));
+        let volume = b"KILLLINE-LAUGHLINE".to_vec();
+        for d in [&valve, &ours] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("pak01_000.vpk"), &volume).unwrap();
+        }
+        let kill = VpkEntry { crc: crc32fast::hash(b"KILLLINE"), preload: vec![], archive: 0, offset: 0, len: 8 };
+        let laugh = VpkEntry { crc: crc32fast::hash(b"LAUGHLINE"), preload: vec![], archive: 0, offset: 9, len: 9 };
+        let mut tree: Tree = BTreeMap::new();
+        put(&mut tree, "sounds/vo/axe/axe_kill_01.vsnd_c", Item::External(&kill));
+        put(&mut tree, "sounds/vo/axe/axe_laugh_01.vsnd_c", Item::External(&laugh));
+        put(&mut tree, "scripts/readme.txt", Item::Inline(b"inline at valve"));
+        write_tree(&tree, File::create(valve.join("pak01_dir.vpk")).unwrap()).unwrap();
+
+        let base = VpkReader::open(valve.join("pak01_dir.vpk")).unwrap();
+        assert_eq!(base.read("sounds/vo/axe/axe_laugh_01.vsnd_c").unwrap(), b"LAUGHLINE");
+        let own = BTreeMap::from([("sounds/vo/axe/axe_kill_01.vsnd_c".to_owned(), b"MY KILL".to_vec())]);
+        write_overlay(Some(&base), &own, File::create(ours.join("pak01_dir.vpk")).unwrap()).unwrap();
+
+        let r = VpkReader::open(ours.join("pak01_dir.vpk")).unwrap();
+        assert_eq!(r.entries().len(), 3);
+        assert_eq!(r.read("sounds/vo/axe/axe_kill_01.vsnd_c").unwrap(), b"MY KILL");
+        assert_eq!(r.read("sounds/vo/axe/axe_laugh_01.vsnd_c").unwrap(), b"LAUGHLINE", "чужое — из тома");
+        assert_eq!(r.read("scripts/readme.txt").unwrap(), b"inline at valve", "встроенное у Valve — перенесено к нам");
+        assert!(!is_signed(&ours.join("pak01_dir.vpk")), "наш пак — без подписи");
+        drop((base, r));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
