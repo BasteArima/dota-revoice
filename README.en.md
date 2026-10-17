@@ -110,6 +110,10 @@ The app checks for new versions by itself: a "Version … is out" banner with a 
   author, and where you both have your own version. Untick a hero to skip it. For conflicts:
   keep mine, take from the bundle, or decide one by one after listening to both. The version
   you don't pick goes to takes, so nothing is lost. Matching lines are skipped automatically.
+- Lines from a bundle are labelled with the author's name — in the line header and in takes.
+  The "with sources for editing" checkbox puts the wav with its trim and loudness into the
+  bundle, so your friend can re-trim without loss. The last import can be undone with
+  **Undo import** on the same card — whatever you changed after the import stays.
 
 After importing, rebuild and install the pack.
 

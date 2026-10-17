@@ -145,6 +145,18 @@ impl App {
                 Status::Recorded => theme::pill(ui, tr!("записано", "recorded"), GREEN),
                 Status::Redo => theme::pill(ui, tr!("переделать", "redo"), AMBER),
             }
+            // Версия из пачки друга: от кого и правил ли я её.
+            if let Some((origin, edited)) = self.project.as_ref().and_then(|p| p.origin(&line)) {
+                let who = super::share::short_author(&origin.author);
+                // Имя без падежа: «от Петя» не скажешь, поэтому — значок и имя, суть — в подсказке.
+                let (text, hint) = if edited {
+                    (trf!("{}  {who} · с правками", "{}  {who} · edited", icon::USER), trf!("Версия из пачки, автор — {who}; ты её менял", "A version from a bundle by {who}; you've changed it"))
+                } else {
+                    (format!("{}  {who}", icon::USER), trf!("Версия из пачки, автор — {who}", "A version from a bundle by {who}"))
+                };
+                let resp = ui.scope(|ui| theme::pill(ui, &text, GOLD)).response;
+                resp.on_hover_text(hint);
+            }
             if status != Status::Empty && !recording {
                 ui.add_space(6.0);
                 let redo = status == Status::Redo;
@@ -579,7 +591,11 @@ impl App {
             for take in &self.takes {
                 ui.horizontal(|ui| {
                     let when = take.saved.map(ago).unwrap_or_default();
-                    ui.label(RichText::new(trf!("№{} · {:.1} с · {when}", "#{} · {:.1} s · {when}", take.id, take.secs)).size(12.0).color(TEXT));
+                    let mut text = trf!("№{} · {:.1} с · {when}", "#{} · {:.1} s · {when}", take.id, take.secs);
+                    if let Some(o) = &take.origin {
+                        text += &format!(" · {}  {}", icon::USER, super::share::short_author(&o.author));
+                    }
+                    ui.label(RichText::new(text).size(12.0).color(TEXT));
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                         if ui.add(egui::Button::new(icon::TRASH).frame(false)).on_hover_text(tr!("В корзину", "To trash")).clicked() {
                             action = Some((take.clone(), TakeAction::Trash));

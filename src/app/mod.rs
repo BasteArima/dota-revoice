@@ -465,8 +465,9 @@ impl App {
             return;
         }
         self.reload_mine(&line);
+        // Вернули чужой дубль без правок — пересобранный mp3 считаем его «нетронутой» версией.
         let saved = self.save_mine().and_then(|_| match self.project.as_mut() {
-            Some(p) => p.mark_recorded(&line),
+            Some(p) => p.mark_recorded(&line).and_then(|_| p.refresh_origin_local(&line)),
             None => Ok(()),
         });
         match saved {

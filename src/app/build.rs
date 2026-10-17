@@ -539,6 +539,21 @@ impl App {
                 }
             });
             ui.label(theme::small(tr!("Пачку героя можно отправить и из «Героев»: правый клик по карточке.", "You can also share a hero from Heroes: right-click their card.")));
+            let last = self.last_import().map(|j| (super::share::short_author(&j.author), super::share::date_of(j.imported_unix), j.lines()));
+            if let Some((author, date, lines)) = last {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(theme::small(trf!("Последний импорт: {author}, {date}, фраз: {lines}", "Last import: {author}, {date}, lines: {lines}")));
+                    let undo = theme::ghost(ui, true, trf!("{}  Отменить импорт", "{}  Undo import", icon::ARROW_COUNTER_CLOCKWISE));
+                    let hint = tr!(
+                        "Новые фразы — в корзину, заменённые — обратно из дублей. Что успел поменять после импорта, останется.",
+                        "New lines go to the trash, replaced ones come back from takes. Whatever you changed after the import stays."
+                    );
+                    if undo.on_hover_text(hint).clicked() {
+                        self.undo_import();
+                    }
+                });
+            }
         });
     }
 }

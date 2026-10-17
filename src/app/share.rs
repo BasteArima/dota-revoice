@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 
 use dota_revoice::audio::{self, Track};
-use dota_revoice::exchange::{self, Decision, Incoming, Kind, Preview};
+use dota_revoice::exchange::{self, Decision, Incoming, Journal, Kind, Preview};
 use dota_revoice::vpk::VpkReader;
 use dota_revoice::{install, tr, trf};
 use eframe::egui::{self, Align, Layout, RichText, vec2};
@@ -21,6 +21,8 @@ pub(super) struct ShareState {
     import: Option<ImportDialog>,
     /// Пачка читается и сравнивается с моими фразами в фоне.
     reading: Option<mpsc::Receiver<Result<(PathBuf, Preview), String>>>,
+    /// Последний импорт (его можно отменить); `None` внутри — импортов не было.
+    last: Option<Option<Journal>>,
 }
 
 impl ShareState {
@@ -32,6 +34,8 @@ impl ShareState {
 struct ExportDialog {
     /// Папка героя (`sounds/vo/axe`), сколько записано, отмечен ли.
     groups: Vec<(String, usize, bool)>,
+    /// Положить исходники (wav, обрезку, обработку) — друг сможет править без потерь.
+    sources: bool,
     error: Option<String>,
 }
 
@@ -91,7 +95,7 @@ impl App {
             return self.info(tr!("Пока нечего отправлять — нет ни одной записанной фразы", "Nothing to send yet — no recorded lines"));
         }
         let groups = groups.into_iter().map(|(g, n)| (only.is_none_or(|o| o == g), g, n)).map(|(on, g, n)| (g, n, on)).collect();
-        self.share.export = Some(ExportDialog { groups, error: None });
+        self.share.export = Some(ExportDialog { groups, sources: false, error: None });
     }
 
     pub(super) fn pick_import(&mut self, ctx: &egui::Context) {
@@ -199,6 +203,13 @@ impl App {
                     }
                 });
             });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if theme::chip(ui, dlg.sources, tr!("с исходниками для правок", "with sources for editing")).clicked() {
+                    dlg.sources = !dlg.sources;
+                }
+                ui.label(theme::small(tr!("wav, обрезка и громкость — пачка тяжелее", "wav, trim and loudness — a heavier bundle")));
+            });
             let selected: usize = dlg.groups.iter().filter(|g| g.2).map(|g| g.1).sum();
             if let Some(e) = &dlg.error {
                 ui.label(RichText::new(e.as_str()).size(12.0).color(RED));
@@ -227,7 +238,7 @@ impl App {
             if let Some(out) = out {
                 let only: BTreeSet<String> = groups.into_iter().cloned().collect();
                 self.config.save();
-                match exchange::export_pack(&self.config.export_root(), &out, &self.config.author, Some(&only)) {
+                match exchange::export_pack(&self.config.export_root(), &out, &self.config.author, Some(&only), dlg.sources) {
                     Ok(n) => {
                         self.info(trf!("В пачке {n} фраз: {}", "{n} lines in the bundle: {}", out.display()));
                         return;
@@ -276,6 +287,13 @@ impl App {
             date_of(p.created_unix),
             p.lines.len()
         )));
+        if p.with_sources() > 0 {
+            ui.label(theme::small(trf!(
+                "С исходниками для правок: {} — обрезку и громкость можно будет поменять без потерь",
+                "With sources for editing: {} — trim and loudness can be changed without loss",
+                p.with_sources()
+            )));
+        }
         if p.newer_format {
             ui.label(RichText::new(tr!("Пачка из более новой версии программы — обнови её, если что-то не так", "The bundle is from a newer app version — update the app if something looks off")).size(12.0).color(AMBER));
         }
@@ -439,7 +457,11 @@ impl App {
                 return;
             }
         }
-        // Новые фразы могут быть и у открытого героя — перечитываем.
+        self.after_import_change();
+    }
+
+    /// Фразы поменялись (импорт или его отмена): перечитать героя, счётчики и журнал.
+    fn after_import_change(&mut self) {
         if let Some(p) = self.project.as_mut() {
             p.rescan();
             let selected = self.selected;
@@ -447,6 +469,32 @@ impl App {
         }
         self.heroes.refresh_counts();
         self.build.refresh_now();
+        self.share.last = None;
+    }
+
+    /// Последний импорт — для «Отменить импорт» (читается с диска один раз).
+    pub(super) fn last_import(&mut self) -> Option<&Journal> {
+        if self.share.last.is_none() {
+            self.share.last = Some(exchange::last_import(&self.config.export_root()));
+        }
+        self.share.last.as_ref().and_then(Option::as_ref)
+    }
+
+    pub(super) fn undo_import(&mut self) {
+        if let Some(p) = &self.player {
+            p.stop();
+        }
+        match exchange::undo_import(&self.config.export_root()) {
+            Ok(u) if u.kept > 0 => self.info(trf!(
+                "Импорт отменён: вернулось {} · {} фраз уже поменяли после импорта — их не трогал",
+                "Import undone: {} reverted · {} lines were changed after the import — left as they are",
+                u.reverted,
+                u.kept
+            )),
+            Ok(u) => self.info(trf!("Импорт отменён: вернулось фраз — {}", "Import undone: lines reverted — {}", u.reverted)),
+            Err(e) => self.error(format!("{e:#}")),
+        }
+        self.after_import_change();
     }
 
     /// Имя группы для людей: герой по имени, иначе сам путь.
@@ -475,7 +523,7 @@ impl App {
 }
 
 /// Подпись в кнопке: длинное имя обрезаем; без подписи — «из пачки».
-fn short_author(author: &str) -> String {
+pub(super) fn short_author(author: &str) -> String {
     match author.trim() {
         "" => tr!("из пачки", "bundle's").to_owned(),
         a if a.chars().count() > 12 => format!("{}…", a.chars().take(11).collect::<String>()),
@@ -488,7 +536,7 @@ fn now_unix() -> u64 {
 }
 
 /// `2026-10-17` по времени в секундах (UTC; для имени файла и подписи пачки хватает).
-fn date_of(unix: u64) -> String {
+pub(super) fn date_of(unix: u64) -> String {
     let days = (unix / 86_400) as i64;
     // Перевод дней в дату (алгоритм Говарда Хиннанта).
     let z = days + 719_468;
