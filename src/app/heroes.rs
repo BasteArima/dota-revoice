@@ -59,6 +59,11 @@ impl HeroesState {
     pub(super) fn busy(&self) -> bool {
         self.scan.is_some() || self.opening.is_some()
     }
+
+    /// Пересчитать «записано» на следующем кадре (после импорта пачки).
+    pub(super) fn refresh_counts(&mut self) {
+        self.counts_at = None;
+    }
 }
 
 impl App {
@@ -223,14 +228,25 @@ impl App {
         let cols = ((width + GAP) / (CARD_MAX + GAP)).ceil().max(1.0) as usize;
         let card_w = ((width - GAP * (cols - 1) as f32) / cols as f32).floor();
         let mut clicked = None;
+        let mut share = None;
         egui::ScrollArea::vertical().id_salt("heroes").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(GAP, GAP);
             for row in shown.chunks(cols) {
                 ui.horizontal(|ui| {
                     for hero in row {
-                        if self.hero_card(ui, hero, card_w).clicked() {
+                        let resp = self.hero_card(ui, hero, card_w);
+                        if resp.clicked() {
                             clicked = Some((*hero).clone());
                         }
+                        let recorded = self.heroes.counts.get(&hero.vo).copied().unwrap_or(0);
+                        resp.context_menu(|ui| {
+                            let text = trf!("{}  Поделиться фразами героя…", "{}  Share this hero's lines…", icon::EXPORT);
+                            let item = ui.add_enabled(recorded > 0, egui::Button::new(text));
+                            if item.on_disabled_hover_text(tr!("У героя пока нет записанных фраз", "This hero has no recorded lines yet")).clicked() {
+                                share = Some(format!("sounds/vo/{}", hero.vo));
+                                ui.close_menu();
+                            }
+                        });
                     }
                 });
             }
@@ -238,6 +254,9 @@ impl App {
         if let Some(hero) = clicked {
             let ctx = ui.ctx().clone();
             self.open_hero(&ctx, &hero);
+        }
+        if let Some(group) = share {
+            self.open_export(Some(&group));
         }
     }
 

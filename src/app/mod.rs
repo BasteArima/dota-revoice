@@ -7,6 +7,7 @@ mod heroes;
 mod loudness;
 mod record;
 mod settings;
+mod share;
 mod setup;
 mod theme;
 
@@ -137,6 +138,7 @@ pub struct App {
     build: BuildState,
     settings: SettingsState,
     heroes: HeroesState,
+    share: share::ShareState,
 }
 
 impl App {
@@ -180,6 +182,7 @@ impl App {
             build: BuildState::default(),
             settings: SettingsState::default(),
             heroes: HeroesState::default(),
+            share: share::ShareState::default(),
             config,
         };
         match Player::new() {
@@ -1044,6 +1047,7 @@ impl eframe::App for App {
             return;
         }
         self.poll_heroes(ctx);
+        self.handle_dropped(ctx);
 
         let bar_frame = egui::Frame::side_top_panel(&ctx.style()).fill(PANEL).inner_margin(egui::Margin::symmetric(14, 10));
         egui::TopBottomPanel::top("top").frame(bar_frame).show(ctx, |ui| self.top_bar(ui));
@@ -1095,6 +1099,7 @@ impl eframe::App for App {
             }
         }
 
+        self.share_windows(ctx);
         self.toast(ctx);
 
         // Анимация волны, индикатора и кнопки записи; в покое — редкая перерисовка.
@@ -1103,6 +1108,7 @@ impl eframe::App for App {
             || self.pending.is_some()
             || self.build.busy()
             || self.match_all_running()
+            || self.share.busy()
             || self.heroes.busy();
         ctx.request_repaint_after(if busy { Duration::from_millis(16) } else { Duration::from_millis(60) });
     }

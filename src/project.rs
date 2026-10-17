@@ -59,6 +59,20 @@ struct State {
     /// Сдвиг тона моей версии, полутоны.
     #[serde(default)]
     pitches: BTreeMap<String, f32>,
+    /// Фразы из пачек друзей: от кого и какая это версия.
+    #[serde(default)]
+    origins: BTreeMap<String, Origin>,
+}
+
+/// Откуда моя версия фразы, если она пришла из пачки друга.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Origin {
+    /// Кто записал (подпись в пачке; пустая — без подписи).
+    pub author: String,
+    /// Отпечаток mp3 в пачке — по нему узнаём ту же версию при повторном импорте.
+    pub hash: String,
+    /// Отпечаток моего mp3 сразу после импорта: совпадает с нынешним — я фразу не менял.
+    pub local: String,
 }
 
 /// Прежний дубль фразы: исходник и то, как он был обрезан и обработан.
@@ -180,6 +194,27 @@ impl Store {
     /// Все заметки: путь ресурса → текст.
     pub fn notes(&self) -> &BTreeMap<String, String> {
         &self.state.notes
+    }
+
+    pub fn origin(&self, res: &str) -> Option<&Origin> {
+        self.state.origins.get(res)
+    }
+
+    pub fn set_origin(&mut self, res: &str, origin: Option<Origin>) -> Result<()> {
+        let changed = match origin {
+            Some(o) => self.state.origins.insert(res.to_owned(), o.clone()) != Some(o),
+            None => self.state.origins.remove(res).is_some(),
+        };
+        self.save_if(changed)
+    }
+
+    /// Кладёт запись сразу в дубли, не трогая текущую версию (чужая версия при конфликте).
+    pub fn add_take(&mut self, res: &str, samples: &[f32]) -> Result<()> {
+        let dir = self.takes_dir(res);
+        std::fs::create_dir_all(&dir)?;
+        let id = self.takes(res).first().map_or(1, |t| t.id + 1);
+        std::fs::write(dir.join(format!("{id:03}.json")), serde_json::to_vec_pretty(&TakeMeta::default())?)?;
+        crate::encode::save_raw(&dir.join(format!("{id:03}.wav")), samples)
     }
 
     /// Прежние дубли, новые первыми.

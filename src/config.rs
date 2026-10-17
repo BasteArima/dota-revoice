@@ -24,6 +24,8 @@ pub struct Config {
     pub build_dir: Option<PathBuf>,
     pub ui_language: UiLanguage,
     pub check_updates: bool,
+    /// Подпись в пачках фраз для друзей («от Васи»).
+    pub author: String,
     pub input_device: Option<String>,
     /// Сразу после записи или импорта обрезать тишину по краям.
     pub auto_trim: bool,
@@ -74,6 +76,7 @@ impl Default for Config {
             build_dir: None,
             ui_language: UiLanguage::Russian,
             check_updates: true,
+            author: String::new(),
             input_device: None,
             auto_trim: true,
             auto_level: true,

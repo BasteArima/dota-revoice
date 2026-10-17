@@ -7,7 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use dota_revoice::install::ModState;
-use dota_revoice::{exchange, game, install, pack};
+use dota_revoice::{game, install, pack};
 use eframe::egui::{self, Align, Align2, Color32, FontId, RichText, Sense, Stroke, vec2};
 
 use super::theme::{self, AMBER, BG_DEEP, FAINT, GOLD, GREEN, LINE, MUTED, ON_GOLD, RED, TEXT, icon};
@@ -85,9 +85,6 @@ pub(super) struct BuildState {
     game_result: Option<Result<String, String>>,
     snapshot: Option<Snapshot>,
     refreshed: Option<Instant>,
-    /// При импорте пачки заменять фразы, которые у меня уже есть.
-    import_replace: bool,
-    exchange_result: Option<Result<String, String>>,
 }
 
 impl Default for BuildState {
@@ -102,8 +99,6 @@ impl Default for BuildState {
             game_result: None,
             snapshot: None,
             refreshed: None,
-            import_replace: false,
-            exchange_result: None,
         }
     }
 }
@@ -522,76 +517,29 @@ impl App {
         });
     }
 
-    /// Обмен фразами: собрать свои в один zip или добавить присланные.
+    /// Обмен фразами: собрать свои в один zip или добавить присланные (см. `share.rs`).
     fn exchange_card(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(icon::USERS_THREE).size(18.0).color(GOLD));
                 ui.label(theme::title(tr!("Обмен с друзьями", "Share with friends"), 15.0));
             });
-            ui.label(theme::small(
-                tr!("Собери все свои фразы в один файл и отправь другу — или добавь фразы, которые прислали тебе. Потом пересобери и установи пак.", "Pack all your lines into one file and send it to a friend — or add lines someone sent you. Then rebuild and install the pack."),
-            ));
+            ui.label(theme::small(tr!(
+                "Собери фразы нужных героев в один файл и отправь другу — или добавь присланные: перед импортом видно, что нового, а где у вас обоих своя версия. Потом пересобери и установи пак.",
+                "Pack the lines of the heroes you pick into one file and send it to a friend — or add lines someone sent you: before importing you see what's new and where you both have your own version. Then rebuild and install the pack."
+            )));
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.add(theme::tool(trf!("{}  Экспорт пачки…", "{}  Export bundle…", icon::EXPORT))).on_hover_text(tr!("Все записанные фразы всех героев + заметки, в zip", "All recorded lines of all heroes + notes, in a zip")).clicked() {
-                    self.export_pack();
+                if ui.add(theme::tool(trf!("{}  Экспорт пачки…", "{}  Export bundle…", icon::EXPORT))).on_hover_text(tr!("Выбери героев — их фразы и заметки уйдут в zip", "Pick heroes — their lines and notes go into a zip")).clicked() {
+                    self.open_export(None);
                 }
-                if ui.add(theme::tool(trf!("{}  Импорт пачки…", "{}  Import bundle…", icon::DOWNLOAD_SIMPLE))).on_hover_text(tr!("zip, который прислал друг", "A zip a friend sent you")).clicked() {
-                    self.import_pack();
-                }
-                if theme::chip(ui, self.build.import_replace, tr!("заменять мои версии", "replace my versions")).on_hover_text(tr!("Твоя версия уйдёт в дубли — её можно вернуть", "Your version goes to takes — you can bring it back")).clicked() {
-                    self.build.import_replace = !self.build.import_replace;
+                if ui.add(theme::tool(trf!("{}  Импорт пачки…", "{}  Import bundle…", icon::DOWNLOAD_SIMPLE))).on_hover_text(tr!("zip от друга; его можно и просто перетащить в окно", "A zip from a friend; you can also just drop it onto the window")).clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.pick_import(&ctx);
                 }
             });
-            result_line(ui, self.build.exchange_result.as_ref());
+            ui.label(theme::small(tr!("Пачку героя можно отправить и из «Героев»: правый клик по карточке.", "You can also share a hero from Heroes: right-click their card.")));
         });
-    }
-
-    fn export_pack(&mut self) {
-        let Some(p) = &self.project else { return };
-        let Some(out) = rfd::FileDialog::new()
-            .set_title(tr!("Куда сохранить пачку фраз", "Where to save the line bundle"))
-            .set_file_name(tr!("dota_revoice_фразы.zip", "dota_revoice_lines.zip"))
-            .add_filter(tr!("Пачка фраз", "Line bundle"), &["zip"])
-            .save_file()
-        else {
-            return;
-        };
-        self.build.exchange_result = Some(match exchange::export_pack(&p.export_root, &out) {
-            Ok(n) => Ok(trf!("В пачке {n} фраз: {}", "{n} lines in the bundle: {}", out.display())),
-            Err(e) => Err(format!("{e:#}")),
-        });
-    }
-
-    fn import_pack(&mut self) {
-        let Some(root) = self.project.as_ref().map(|p| p.export_root.clone()) else { return };
-        let Some(file) = rfd::FileDialog::new().set_title(tr!("Пачка фраз от друга", "Line bundle from a friend")).add_filter(tr!("Пачка фраз", "Line bundle"), &["zip"]).pick_file() else {
-            return;
-        };
-        let result = exchange::import_pack(&root, &file, self.build.import_replace);
-        self.build.exchange_result = Some(match result {
-            Ok(s) => {
-                let mut parts = vec![trf!("Добавлено {}", "Added {}", s.added)];
-                if s.replaced > 0 {
-                    parts.push(trf!("заменено {} (твои версии — в дублях)", "replaced {} (your versions are in takes)", s.replaced));
-                }
-                if !s.kept.is_empty() {
-                    parts.push(trf!("оставлены твои: {}", "kept yours: {}", s.kept.len()));
-                }
-                if !s.rejected.is_empty() {
-                    parts.push(trf!("пропущены лишние файлы: {}", "skipped extra files: {}", s.rejected.len()));
-                }
-                Ok(parts.join(" · "))
-            }
-            Err(e) => Err(format!("{e:#}")),
-        });
-        // Новые фразы могут быть и у открытого героя — перечитываем.
-        if let Some(p) = self.project.as_mut() {
-            p.rescan();
-        }
-        self.select(self.selected);
-        self.build.refresh_now();
     }
 }
 

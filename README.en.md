@@ -102,9 +102,14 @@ The app checks for new versions by itself: a "Version … is out" banner with a 
 
 **Build & install** → **Share with friends**:
 
-- **Export bundle…** — all your lines for all heroes (and notes) in one zip.
-- **Import bundle…** — adds a friend's lines. Your versions are left alone unless you turn on
-  "replace my versions"; then yours goes into takes and can be brought back.
+- **Export bundle…** — pick the heroes (all by default) and sign it — their lines and notes go
+  into one zip. You can also share a single hero from **Heroes**: right-click the card →
+  **Share this hero's lines…**.
+- **Import bundle…** (or just drop the zip onto the window) — first you see what's inside: for
+  each hero, how many lines are new, how many match yours, how many are updates from the same
+  author, and where you both have your own version. Untick a hero to skip it. For conflicts:
+  keep mine, take from the bundle, or decide one by one after listening to both. The version
+  you don't pick goes to takes, so nothing is lost. Matching lines are skipped automatically.
 
 After importing, rebuild and install the pack.
 
