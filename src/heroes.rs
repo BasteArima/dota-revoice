@@ -24,7 +24,7 @@ use crate::vsnd;
 use crate::trf;
 
 /// Меняется, когда меняется содержимое кеша — тогда список пересобирается.
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 const HERO_SCRIPTS: &str = "scripts/npc/heroes/npc_dota_hero_";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,7 +98,9 @@ fn scan(main_pak: &Path, voice_pak: &Path, name_lang: &str, cache_dir: &Path) ->
         if let Some(png) = png_of(&vtex) {
             let _ = std::fs::write(&path, png);
         } else if let Some((w, h, rgba)) = dxt5_of(&vtex) {
-            let _ = write_png(&path, w, h, &rgba);
+            // У новых героев портрет вдвое мельче (71×94) — доводим до размера остальных.
+            let (w, h, rgba) = upscale2x(w as usize, h as usize, &rgba);
+            let _ = write_png(&path, w as u32, h as u32, &rgba);
         }
     }
     let english = line_counts(&main);
@@ -323,10 +325,57 @@ fn dxt5_block(b: &[u8]) -> [[u8; 4]; 16] {
 
 /// Масштабированный YCoCg-DXT5: Co и Cg в красном и зелёном, масштаб в синем, яркость в альфе.
 fn from_ycocg([r, g, b, a]: [u8; 4]) -> [u8; 4] {
-    let scale = (b as i32 >> 3) + 1;
-    let (co, cg, y) = ((r as i32 - 128) / scale, (g as i32 - 128) / scale, a as i32);
-    let c = |v: i32| v.clamp(0, 255) as u8;
+    // Без округления до целых на делении — иначе на плавных переходах видны ступеньки.
+    let scale = ((b >> 3) + 1) as f32;
+    let (co, cg, y) = ((r as f32 - 128.0) / scale, (g as f32 - 128.0) / scale, a as f32);
+    let c = |v: f32| v.round().clamp(0.0, 255.0) as u8;
     [c(y + co - cg), c(y + cg), c(y - co - cg), 255]
+}
+
+/// Увеличение вдвое бикубическим фильтром (Catmull-Rom), сначала по строкам, потом по столбцам.
+/// Мягче и чище, чем растянуть мелкую картинку при показе.
+fn upscale2x(w: usize, h: usize, rgba: &[u8]) -> (usize, usize, Vec<u8>) {
+    let kernel = |t: f32| {
+        let t = t.abs();
+        if t < 1.0 {
+            1.5 * t * t * t - 2.5 * t * t + 1.0
+        } else if t < 2.0 {
+            -0.5 * t * t * t + 2.5 * t * t - 4.0 * t + 2.0
+        } else {
+            0.0
+        }
+    };
+    // Четыре соседних пикселя исходника и их веса для точки `x` результата.
+    let taps = |x: usize, n: usize| -> [(usize, f32); 4] {
+        let s = (x as f32 + 0.5) / 2.0 - 0.5;
+        let base = s.floor() as isize - 1;
+        std::array::from_fn(|k| {
+            let i = base + k as isize;
+            (i.clamp(0, n as isize - 1) as usize, kernel(s - i as f32))
+        })
+    };
+    let (nw, nh) = (w * 2, h * 2);
+    let mut rows = vec![0f32; nw * h * 4];
+    for y in 0..h {
+        for x in 0..nw {
+            for (i, wt) in taps(x, w) {
+                for c in 0..4 {
+                    rows[(y * nw + x) * 4 + c] += rgba[(y * w + i) * 4 + c] as f32 * wt;
+                }
+            }
+        }
+    }
+    let mut out = vec![0u8; nw * nh * 4];
+    for y in 0..nh {
+        let t = taps(y, h);
+        for x in 0..nw {
+            for c in 0..4 {
+                let v: f32 = t.iter().map(|&(i, wt)| rows[(i * nw + x) * 4 + c] * wt).sum();
+                out[(y * nw + x) * 4 + c] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    (nw, nh, out)
 }
 
 fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
@@ -432,6 +481,19 @@ mod tests {
         std::fs::write(root.join("export/sounds/vo/axe/axe_kill_01.mp3"), b"x").unwrap();
         assert_eq!(recorded_counts(&root.join("export")).get("axe"), Some(&1));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upscale_keeps_flat_color_and_doubles_size() {
+        let flat: Vec<u8> = [10u8, 200, 30, 255].repeat(3 * 2);
+        let (w, h, out) = upscale2x(3, 2, &flat);
+        assert_eq!((w, h, out.len()), (6, 4, 6 * 4 * 4));
+        assert!(out.chunks(4).all(|px| px == [10, 200, 30, 255]));
+        // Ступенька чёрное → белое остаётся монотонной по краям и не выходит за пределы.
+        let step: Vec<u8> = [0u8, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255].to_vec();
+        let (_, _, out) = upscale2x(4, 1, &step);
+        assert_eq!(out[0], 0);
+        assert_eq!(out[7 * 4], 255);
     }
 
     #[test]
