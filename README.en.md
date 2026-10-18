@@ -39,11 +39,36 @@ that the game loads instead of Valve's voice-over.
 
 *The screenshots show the Russian interface; the English one has the same layout.*
 
-![Heroes: every Dota hero with portraits and a count of recorded lines](docs/screenshots/heroes.jpg)
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/heroes.jpg"><img src="docs/screenshots/heroes.jpg" alt="Heroes" width="100%"></a><br>
+      <sub><b>Heroes</b> — every Dota hero with portraits, personas and automatons next to them</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/record.png"><img src="docs/screenshots/record.png" alt="Record" width="100%"></a><br>
+      <sub><b>Record</b> — the original and my version: trim, loudness, pitch</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/abilities.png"><img src="docs/screenshots/abilities.png" alt="Abilities" width="100%"></a><br>
+      <sub><b>Abilities</b> — a hero's sounds grouped by ability, with icons</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/items.jpg"><img src="docs/screenshots/items.jpg" alt="Items" width="100%"></a><br>
+      <sub><b>Items</b> — item sounds with icons from the game</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <a href="docs/screenshots/build.png"><img src="docs/screenshots/build.png" alt="Build & install" width="50%"></a><br>
+      <sub><b>Build & install</b> — three steps and the “My voice-over / Valve voice-over” switch</sub>
+    </td>
+  </tr>
+</table>
 
-![Record: the original and my version with trim, loudness and pitch](docs/screenshots/record.png)
-
-![Build & install: three steps and the "My voice-over / Valve voice-over" switch](docs/screenshots/build.png)
+<sub>Click a picture to open it full size.</sub>
 
 > A fan project, not affiliated with Valve. The app only changes files in the voice-over
 > language folder (`game/dota_russian` etc.) and can undo everything it does.

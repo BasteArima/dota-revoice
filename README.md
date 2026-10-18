@@ -37,11 +37,36 @@
 
 ## Как это выглядит
 
-![Герои: все герои Доты с портретами, счётчик записанных фраз](docs/screenshots/heroes.jpg)
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/heroes.jpg"><img src="docs/screenshots/heroes.jpg" alt="Герои" width="100%"></a><br>
+      <sub><b>Герои</b> — все герои Доты с портретами, рядом личности и автоматоны</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/record.png"><img src="docs/screenshots/record.png" alt="Запись" width="100%"></a><br>
+      <sub><b>Запись</b> — оригинал и моя версия: обрезка, громкость, тон</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/abilities.png"><img src="docs/screenshots/abilities.png" alt="Способности" width="100%"></a><br>
+      <sub><b>Способности</b> — звуки героя по способностям, с иконками</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/items.jpg"><img src="docs/screenshots/items.jpg" alt="Предметы" width="100%"></a><br>
+      <sub><b>Предметы</b> — звуки предметов с иконками из игры</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <a href="docs/screenshots/build.png"><img src="docs/screenshots/build.png" alt="Сборка и установка" width="50%"></a><br>
+      <sub><b>Сборка и установка</b> — три шага и переключатель «Моя озвучка / Озвучка Valve»</sub>
+    </td>
+  </tr>
+</table>
 
-![Запись: оригинал и моя версия с обрезкой, громкостью и тоном](docs/screenshots/record.png)
-
-![Сборка и установка: три шага и переключатель «Моя озвучка / Озвучка Valve»](docs/screenshots/build.png)
+<sub>Нажми на картинку, чтобы открыть её в полном размере.</sub>
 
 > Фанатский проект, не связан с Valve. Программа меняет только файлы в папке
 > языка озвучки (`game/dota_russian` и т.п.) и всё умеет откатывать.
