@@ -85,8 +85,9 @@ enum ImportAction {
 }
 
 impl App {
-    /// Окно экспорта; `only` — папка героя, если пришли из его карточки.
-    pub(super) fn open_export(&mut self, only: Option<&str>) {
+    /// Окно экспорта; `only` — отмеченные папки (фразы и способности героя, предметы),
+    /// если пришли из карточки; пусто — отмечено всё.
+    pub(super) fn open_export(&mut self, only: &[String]) {
         let groups = match exchange::recorded_groups(&self.config.export_root()) {
             Ok(g) => g,
             Err(e) => return self.error(format!("{e:#}")),
@@ -94,7 +95,7 @@ impl App {
         if groups.is_empty() {
             return self.info(tr!("Пока нечего отправлять — нет ни одной записанной фразы", "Nothing to send yet — no recorded lines"));
         }
-        let groups = groups.into_iter().map(|(g, n)| (only.is_none_or(|o| o == g), g, n)).map(|(on, g, n)| (g, n, on)).collect();
+        let groups = groups.into_iter().map(|(g, n)| (only.is_empty() || only.contains(&g), g, n)).map(|(on, g, n)| (g, n, on)).collect();
         self.share.export = Some(ExportDialog { groups, sources: false, error: None });
     }
 
@@ -468,6 +469,7 @@ impl App {
             self.select(selected);
         }
         self.heroes.refresh_counts();
+        self.items.refresh();
         self.build.refresh_now();
         self.share.last = None;
     }
@@ -499,6 +501,14 @@ impl App {
 
     /// Имя группы для людей: герой по имени, иначе сам путь.
     fn group_name(&self, group: &str) -> String {
+        if group == dota_revoice::sfx::ITEM_SOUNDS {
+            return tr!("Предметы", "Items").to_owned();
+        }
+        if let Some(set) = self.sound_set_for(group)
+            && let Some(hero) = self.heroes.list().and_then(|l| l.iter().find(|h| h.sounds.as_ref() == Some(set)))
+        {
+            return trf!("{} · способности", "{} · abilities", hero.name);
+        }
         match group.strip_prefix("sounds/vo/") {
             Some(vo) if !vo.contains('/') => self.hero_name(vo),
             _ => group.to_owned(),

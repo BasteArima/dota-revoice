@@ -58,7 +58,7 @@ pub fn build(
     progress: impl Fn(f32),
 ) -> Result<Summary> {
     let mut vpk = VpkBuilder::default();
-    let compiled = compile(replacements)?;
+    let compiled = compile(replacements, None)?;
 
     let mut not_in_base = Vec::new();
     let mut copied = 0;
@@ -95,8 +95,11 @@ pub fn build(
 /// Остальная озвучка не копируется — игра читает её из томов Valve `pak01_00N.vpk`,
 /// которые лежат рядом. `copied` в итоге — сколько файлов Valve взято ссылкой.
 /// Без `base` в паке только мои фразы — остальные в игре станут английскими.
-pub fn build_overlay(base: Option<&Path>, replacements: &BTreeMap<String, PathBuf>, out_path: &Path) -> Result<Summary> {
-    let mut own = compile(replacements)?;
+/// `sfx_source` — основной пак игры: у звуков способностей и предметов из него берётся,
+/// зациклен ли оригинал.
+pub fn build_overlay(base: Option<&Path>, replacements: &BTreeMap<String, PathBuf>, out_path: &Path, sfx_source: Option<&Path>) -> Result<Summary> {
+    let sfx = sfx_source.map(VpkReader::open).transpose()?;
+    let mut own = compile(replacements, sfx.as_ref())?;
     let reader = base.map(VpkReader::open).transpose()?;
     let not_in_base: Vec<String> = match &reader {
         Some(r) => own.keys().filter(|p| !r.contains(p)).cloned().collect(),
@@ -159,13 +162,66 @@ fn cached<T: Clone>(cache: &Cache<T>, path: &Path, compute: impl FnOnce() -> Opt
     value
 }
 
-/// Мои mp3 → `.vsnd_c` по путям ресурсов.
-fn compile(replacements: &BTreeMap<String, PathBuf>) -> Result<BTreeMap<String, Vec<u8>>> {
+/// Мои mp3 → `.vsnd_c` по путям ресурсов. Фразы не зацикливаются (петля с начала, как
+/// у Valve). Звук эффекта зациклен, только если зациклен оригинал (`sfx_source`), — тогда
+/// целиком; иначе играет один раз (−1), как почти все звуки способностей.
+fn compile(replacements: &BTreeMap<String, PathBuf>, sfx_source: Option<&VpkReader>) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut compiled = BTreeMap::new();
     for (resource, file) in replacements {
         let bytes = std::fs::read(file).with_context(|| trf!("не читается {}", "can't read {}", file.display()))?;
         let stream = mp3::parse(&bytes).with_context(|| trf!("не разобрал mp3 {}", "couldn't parse mp3 {}", file.display()))?;
-        compiled.insert(format!("{resource}.vsnd_c"), vsnd::build(resource, &stream));
+        let path = format!("{resource}.vsnd_c");
+        let res = if resource.starts_with("sounds/vo/") {
+            vsnd::build(resource, &stream)
+        } else {
+            let looped = sfx_source.and_then(|r| r.read(&path).ok()).and_then(|d| vsnd::loop_start(&d)).is_some_and(|l| l >= 0);
+            vsnd::build_looped(resource, &stream, if looped { 0 } else { -1 })
+        };
+        compiled.insert(path, res);
     }
     Ok(compiled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vpk::VpkBuilder;
+
+    /// Зацикленный звук эффекта остаётся зацикленным, остальные играют один раз, фразы — как у Valve.
+    #[test]
+    fn sound_effects_keep_the_original_loop() {
+        let dir = std::env::temp_dir().join(format!("dota_revoice_pack_loop_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tone: Vec<f32> = (0..20000).map(|i| (i as f32 * 0.05).sin() * 0.3).collect();
+        let mp3_file = dir.join("mine.mp3");
+        crate::encode::write_mp3(&mp3_file, &tone).unwrap();
+        let stream = mp3::parse(&std::fs::read(&mp3_file).unwrap()).unwrap();
+
+        // «Основной пак игры»: один звук зациклен, другой нет.
+        let mut main = VpkBuilder::default();
+        main.add("sounds/weapons/hero/enigma/black_hole_loop.vsnd_c", vsnd::build_looped("x", &stream, 0)).unwrap();
+        main.add("sounds/items/black_king_bar.vsnd_c", vsnd::build_looped("x", &stream, -1)).unwrap();
+        let main_path = dir.join("pak01_dir.vpk");
+        main.write_to(File::create(&main_path).unwrap()).unwrap();
+        let main = VpkReader::open(&main_path).unwrap();
+
+        let mine: BTreeMap<String, PathBuf> = [
+            "sounds/weapons/hero/enigma/black_hole_loop",
+            "sounds/items/black_king_bar",
+            "sounds/weapons/hero/axe/berserkers_call",
+            "sounds/vo/axe/axe_kill_01",
+        ]
+        .iter()
+        .map(|r| (r.to_string(), mp3_file.clone()))
+        .collect();
+        let out = compile(&mine, Some(&main)).unwrap();
+        let loop_of = |r: &str| vsnd::loop_start(&out[&format!("{r}.vsnd_c")]);
+        assert_eq!(loop_of("sounds/weapons/hero/enigma/black_hole_loop"), Some(0));
+        assert_eq!(loop_of("sounds/items/black_king_bar"), Some(-1));
+        assert_eq!(loop_of("sounds/weapons/hero/axe/berserkers_call"), Some(-1), "нет в паке — играет один раз");
+        assert_eq!(loop_of("sounds/vo/axe/axe_kill_01"), Some(0), "фразы — как у Valve");
+        drop(main);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

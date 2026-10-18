@@ -382,7 +382,7 @@ mod tests {
     /// Собирает наш пак на текущем оглавлении Valve, как вкладка сборки.
     fn build(dota: &DotaInstall, out: &Path) {
         let base = valve_index(dota).unwrap();
-        pack::build_overlay(Some(&base), &BTreeMap::new(), out).unwrap();
+        pack::build_overlay(Some(&base), &BTreeMap::new(), out, None).unwrap();
     }
 
     #[test]

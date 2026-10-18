@@ -21,6 +21,9 @@ that the game loads instead of Valve's voice-over.
 
 - every Dota hero with portraits — the app extracts the lines from the game itself, no Source 2 Viewer needed;
 - a hero's lines grouped by category, with search and notes on lines;
+- hero ability and item sounds — grouped by ability and item, with icons;
+- personas and automatons (Anti-Mage "Wei", Axe Automaton…) — their own cards next to the hero;
+  arcana and set lines and sounds — sections under the hero that one checkbox hides;
 - waveforms of the original and your version on the same scale, "original → mine" comparison;
 - microphone recording: a 3-2-1 countdown or "listen to the original first";
 - silence trimming (automatic or by hand on the waveform), loudness matched to the original (LUFS) —
@@ -77,7 +80,8 @@ The app checks for new versions by itself: a "Version … is out" banner with a 
    voice-over pack (into the workspace folder, `originals/`). Heroes marked "EN" have no
    voice-over in the selected language — their original is English, and your lines will
    replace it in the game. Sounds that aren't in the list (announcers, couriers, your own
-   export) — "Open my own folder…".
+   export) — "Open my own folder…". A hero's ability sounds are behind the **Abilities**
+   switch above the line list, item sounds are on the **Items** tab.
 2. **Record.** Pick a line, listen to the original (Space), press R or the big red button,
    say the line, press R again. Silence at the edges and loudness are adjusted automatically.
 3. **Build & install** → **Build the pack** → **Install** (close Dota first) →
@@ -139,6 +143,10 @@ left untouched.
 If Steam puts its own `pak01_dir.vpk` back after an update, the app shows a warning and asks you
 to rebuild the pack — the old one points into the old volumes. The language folder is picked by the game's voice-over setting: with English
 voice-over, mods from a language folder don't load — the app warns about that too.
+
+Ability and item sounds live in the game's main pack (`game/dota/`), but a pack in the language
+folder overrides them too, so they go into the same `pak01_dir.vpk`. Your sound plays once, like
+the original; it loops only if the original loops.
 
 ## Building from source
 

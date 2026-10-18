@@ -10,9 +10,11 @@
 //! Фразы — в паке выбранной озвучки (`dota_russian/pak01`): `sounds/vo/<папка>/*.vsnd_c`.
 //! Озвучка на других языках есть не у всех героев: у остальных оригинал — английский
 //! из основного пака, а свои фразы из папки языка всё равно перекрывают его в игре.
+//! Личности и автоматоны (`voice.rs`) — отдельные карточки с той же папкой озвучки:
+//! их фраз нет в других языках, оригинал у них всегда английский.
 //! Разбор терпеливый: нет имени — имя из id, нет портрета — у героя будет заглушка.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -20,12 +22,16 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::vpk::VpkReader;
+use crate::sfx::{self, SoundSet};
+use crate::voice::{self, Part, Variant};
 use crate::vsnd;
 use crate::trf;
 
 /// Меняется, когда меняется содержимое кеша — тогда список пересобирается.
-const CACHE_VERSION: u32 = 5;
+const CACHE_VERSION: u32 = 15;
 const HERO_SCRIPTS: &str = "scripts/npc/heroes/npc_dota_hero_";
+/// Меняется, когда распаковка начинает понимать новые форматы звука.
+const EXTRACT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Hero {
@@ -38,39 +44,63 @@ pub struct Hero {
     pub lines: usize,
     /// В выбранной озвучке героя нет — оригинал берём английский из основного пака.
     pub english_only: bool,
+    /// Звуки способностей героя по способностям (из основного пака).
+    #[serde(default)]
+    pub sounds: Option<SoundSet>,
+    /// Личность или автоматон основного героя (у них свой `id`, папка — его).
+    #[serde(default)]
+    pub variant: Option<Variant>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct Catalog {
+impl Hero {
+    /// Ключ карточки для счётчиков «записано»: `axe`, `axe:automaton`.
+    pub fn card_key(&self) -> String {
+        voice::card_key(&self.vo, self.variant)
+    }
+
+    /// Звуков способностей у этой карточки.
+    pub fn sound_count(&self) -> usize {
+        self.sounds.as_ref().map_or(0, |s| s.files.iter().filter(|f| f.variant == self.variant).count())
+    }
+}
+
+/// Что программа знает об игре: герои и звуки предметов.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Catalog {
     stamp: String,
-    heroes: Vec<Hero>,
+    pub heroes: Vec<Hero>,
+    #[serde(default)]
+    pub items: Option<SoundSet>,
 }
 
 /// Список героев: из кеша, если паки игры не менялись, иначе — разбором паков.
 /// `main_pak` — `game/dota/pak01_dir.vpk`, `voice_pak` — пак выбранной озвучки,
-/// `name_lang` — язык имён (`russian`). Портреты кладутся в `cache_dir/portraits`.
-pub fn load_or_scan(main_pak: &Path, voice_pak: &Path, name_lang: &str, cache_dir: &Path) -> Result<Vec<Hero>> {
+/// `name_lang` — язык имён (`russian`). Портреты кладутся в `cache_dir/portraits`,
+/// иконки способностей и предметов — в `cache_dir/icons`.
+pub fn load_or_scan(main_pak: &Path, voice_pak: &Path, name_lang: &str, cache_dir: &Path) -> Result<Catalog> {
     let stamp = format!("{CACHE_VERSION}|{name_lang}|{}|{}", file_stamp(main_pak), file_stamp(voice_pak));
     let cache = cache_dir.join("heroes.json");
     if let Some(c) = std::fs::read(&cache).ok().and_then(|b| serde_json::from_slice::<Catalog>(&b).ok())
         && c.stamp == stamp
     {
-        return Ok(c.heroes);
+        return Ok(c);
     }
-    let heroes = scan(main_pak, voice_pak, name_lang, cache_dir)?;
+    let (heroes, items) = scan(main_pak, voice_pak, name_lang, cache_dir)?;
+    let catalog = Catalog { stamp, heroes, items };
     std::fs::create_dir_all(cache_dir).with_context(|| trf!("не создаётся {}", "can't create {}", cache_dir.display()))?;
-    let json = serde_json::to_vec_pretty(&Catalog { stamp, heroes: heroes.clone() })?;
+    let json = serde_json::to_vec_pretty(&catalog)?;
     std::fs::write(&cache, json).with_context(|| trf!("не записывается {}", "can't write {}", cache.display()))?;
-    Ok(heroes)
+    Ok(catalog)
 }
 
 pub fn portrait_path(cache_dir: &Path, id: &str) -> PathBuf {
     cache_dir.join("portraits").join(format!("{id}.png"))
 }
 
-fn scan(main_pak: &Path, voice_pak: &Path, name_lang: &str, cache_dir: &Path) -> Result<Vec<Hero>> {
+fn scan(main_pak: &Path, voice_pak: &Path, name_lang: &str, cache_dir: &Path) -> Result<(Vec<Hero>, Option<SoundSet>)> {
     let main = VpkReader::open(main_pak)?;
     let mut heroes = Vec::new();
+    let mut scripts = HashMap::new();
     for path in main.entries().keys().filter(|p| p.starts_with(HERO_SCRIPTS) && p.ends_with(".txt")) {
         let id = &path[HERO_SCRIPTS.len()..path.len() - 4];
         let Ok(bytes) = main.read(path) else { continue };
@@ -79,59 +109,124 @@ fn scan(main_pak: &Path, voice_pak: &Path, name_lang: &str, cache_dir: &Path) ->
         if kv_value(&text, "Enabled").as_deref() == Some("0") {
             continue;
         }
-        heroes.push(Hero { id: id.to_owned(), vo, name: String::new(), lines: 0, english_only: false });
+        heroes.push(Hero { id: id.to_owned(), vo, name: String::new(), lines: 0, english_only: false, sounds: None, variant: None });
+        scripts.insert(id.to_owned(), text.into_owned());
     }
     ensure!(!heroes.is_empty(), trf!("в {} не нашлось героев — формат игры поменялся?", "no heroes found in {} — did the game format change?", main_pak.display()));
+
+    // Личности и автоматоны — по своим фразам в английской озвучке основного пака.
+    let english = line_names(&main);
+    let mut variants = Vec::new();
+    for h in &heroes {
+        for v in Variant::ALL {
+            let lines = english.get(&h.vo).map_or(0, |names| names.iter().filter(|n| voice::split(&h.vo, n).0 == Part::Variant(v)).count());
+            if lines > 0 {
+                variants.push(Hero { id: v.hero_id(&h.id), vo: h.vo.clone(), name: String::new(), lines, english_only: false, sounds: None, variant: Some(v) });
+            }
+        }
+    }
+    heroes.extend(variants);
 
     let names = [name_lang, "english"].map(|lang| {
         main.read(&format!("resource/localization/abilities_{lang}.txt"))
             .map(|b| hero_names(&String::from_utf8_lossy(&b)))
             .unwrap_or_default()
     });
+    let name_of = |id: &str| names.iter().find_map(|n| n.get(id).cloned());
     let portraits = cache_dir.join("portraits");
     std::fs::create_dir_all(&portraits).with_context(|| trf!("не создаётся {}", "can't create {}", portraits.display()))?;
     for h in &mut heroes {
-        h.name = names.iter().find_map(|n| n.get(&h.id).cloned()).unwrap_or_else(|| title_case(&h.id));
+        h.name = name_of(&h.id).unwrap_or_else(|| match h.variant.and_then(|v| Some((Variant::of_hero_id(&h.id)?.0, v))) {
+            // Имени в игре нет — «Axe (автоматон)».
+            Some((base, v)) => format!("{} ({})", name_of(base).unwrap_or_else(|| title_case(base)), v.label()),
+            None => title_case(&h.id),
+        });
         let image = format!("panorama/images/heroes/selection/npc_dota_hero_{}_png.vtex_c", h.id);
         let Ok(vtex) = main.read(&image) else { continue };
         let path = portrait_path(cache_dir, &h.id);
         if let Some(png) = png_of(&vtex) {
             let _ = std::fs::write(&path, png);
-        } else if let Some((w, h, rgba)) = dxt5_of(&vtex) {
+        } else if let Some((w, h, rgba)) = texture_of(&vtex) {
             // У новых героев портрет вдвое мельче (71×94) — доводим до размера остальных.
             let (w, h, rgba) = upscale2x(w as usize, h as usize, &rgba);
             let _ = write_png(&path, w as u32, h as u32, &rgba);
         }
     }
-    let english = line_counts(&main);
+    // Звуки способностей и предметов — по подписям из игры (на языке интерфейса, иначе английские).
+    let tooltips = [name_lang, "english"].map(|lang| {
+        main.read(&format!("resource/localization/abilities_{lang}.txt"))
+            .map(|b| sfx::tooltip_names(&String::from_utf8_lossy(&b)))
+            .unwrap_or_default()
+    });
+    let folders: BTreeSet<String> = main
+        .entries()
+        .keys()
+        .filter_map(|p| p.strip_prefix(&format!("{}/", sfx::HERO_SOUNDS))?.split_once('/').map(|(f, _)| f.to_owned()))
+        .collect();
+    for h in heroes.iter_mut().filter(|h| h.variant.is_none()) {
+        let script = scripts.get(&h.id).map_or("", String::as_str);
+        h.sounds = sfx::hero_folder(&h.id, &h.vo, &folders).and_then(|f| sfx::hero_set(&main, f, &h.id, script, &tooltips, cache_dir));
+    }
+    // У личности и автоматона — звуки основного героя, помеченные для них (`blink_in_persona`).
+    // Помеченные для карточки, которой нет, остаются у основного.
+    let cards: BTreeSet<String> = heroes.iter().map(Hero::card_key).collect();
+    let mut shared = HashMap::new();
+    for h in heroes.iter_mut().filter(|h| h.variant.is_none()) {
+        let Some(set) = &mut h.sounds else { continue };
+        for f in &mut set.files {
+            if f.variant.is_some_and(|v| !cards.contains(&voice::card_key(&h.vo, Some(v)))) {
+                f.variant = None;
+            }
+        }
+        shared.insert(h.vo.clone(), set.clone());
+    }
+    for h in heroes.iter_mut().filter(|h| h.variant.is_some()) {
+        h.sounds = shared.get(&h.vo).filter(|s| s.files.iter().any(|f| f.variant == h.variant)).cloned();
+    }
+    let items = sfx::item_set(&main, &tooltips, cache_dir);
     drop(main);
 
     let same = voice_pak == main_pak;
-    let voiced = if same { english.clone() } else { line_counts(&VpkReader::open(voice_pak)?) };
-    for h in &mut heroes {
-        match voiced.get(&h.vo) {
-            Some(&n) => h.lines = n,
-            None => {
-                h.lines = english.get(&h.vo).copied().unwrap_or(0);
-                h.english_only = !same;
-            }
+    let voiced = if same { english.clone() } else { line_names(&VpkReader::open(voice_pak)?) };
+    for h in heroes.iter_mut() {
+        if h.variant.is_some() {
+            // Фраз личностей и автоматонов в других языках нет.
+            h.english_only = !same;
+            continue;
         }
+        let own = voiced.get(&h.vo);
+        h.english_only = own.is_none() && !same;
+        let mut lines: BTreeSet<&str> = own
+            .or_else(|| english.get(&h.vo))
+            .into_iter()
+            .flatten()
+            .filter(|n| !matches!(voice::split(&h.vo, n).0, Part::Variant(_)))
+            .map(String::as_str)
+            .collect();
+        // Арканы и наборы обычно озвучены только по-английски — они тоже у героя.
+        if !h.english_only && !same {
+            let skins = english.get(&h.vo).into_iter().flatten().filter(|n| matches!(voice::split(&h.vo, n).0, Part::Skin { .. }));
+            lines.extend(skins.map(String::as_str));
+        }
+        h.lines = lines.len();
     }
     // Героя без фраз в этой озвучке записывать не с чем.
     heroes.retain(|h| h.lines > 0);
-    heroes.sort_by_key(|h| h.name.to_lowercase());
-    Ok(heroes)
+    // Личность и автоматон — сразу за своим героем.
+    let base_names: HashMap<String, String> = heroes.iter().filter(|h| h.variant.is_none()).map(|h| (h.vo.clone(), h.name.to_lowercase())).collect();
+    heroes.sort_by_key(|h| (base_names.get(&h.vo).cloned().unwrap_or_else(|| h.name.to_lowercase()), h.variant.map_or(0, |v| 1 + v as usize)));
+    Ok((heroes, items))
 }
 
-/// Фраз в каждой папке `sounds/vo/<папка>/` (без вложенных папок).
-fn line_counts(pak: &VpkReader) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
+/// Имена фраз в каждой папке `sounds/vo/<папка>/` (без вложенных папок).
+fn line_names(pak: &VpkReader) -> HashMap<String, Vec<String>> {
+    let mut names: HashMap<String, Vec<String>> = HashMap::new();
     for path in pak.entries().keys() {
-        if let Some((folder, _)) = vo_entry(path) {
-            *counts.entry(folder.to_owned()).or_default() += 1;
+        if let Some((folder, name)) = vo_entry(path) {
+            names.entry(folder.to_owned()).or_default().push(name.to_owned());
         }
     }
-    counts
+    names
 }
 
 /// `sounds/vo/axe/axe_kill_01.vsnd_c` → (`axe`, `axe_kill_01`).
@@ -144,49 +239,67 @@ fn vo_entry(path: &str) -> Option<(&str, &str)> {
 /// Достаёт фразы героя из пака озвучки в `out_dir` mp3-файлами с игровыми именами.
 /// Пока пак тот же, повторно не распаковывает. Возвращает число фраз.
 pub fn extract_lines(voice_pak: &Path, vo: &str, out_dir: &Path) -> Result<usize> {
-    let stamp = file_stamp(voice_pak);
+    extract_folder(voice_pak, &format!("sounds/vo/{vo}"), out_dir)
+}
+
+/// Достаёт звуки одной папки пака (`sounds/weapons/hero/axe`, `sounds/items`) в `out_dir`:
+/// mp3 — как есть, несжатые — в wav. Вложенные папки не берёт.
+pub fn extract_folder(pak_path: &Path, folder: &str, out_dir: &Path) -> Result<usize> {
+    // Версия распаковки в метке: новая версия читает больше форматов — достаём заново.
+    let stamp = format!("{}|{EXTRACT_VERSION}", file_stamp(pak_path));
     let marker = out_dir.join(".source");
     let existing = count_audio(out_dir);
     if existing > 0 && std::fs::read_to_string(&marker).is_ok_and(|s| s == stamp) {
         return Ok(existing);
     }
-    let pak = VpkReader::open(voice_pak)?;
+    let pak = VpkReader::open(pak_path)?;
     std::fs::create_dir_all(out_dir).with_context(|| trf!("не создаётся {}", "can't create {}", out_dir.display()))?;
+    let prefix = format!("{folder}/");
     let mut n = 0;
     for path in pak.entries().keys() {
-        let Some((folder, name)) = vo_entry(path) else { continue };
-        if folder != vo {
-            continue;
-        }
+        let Some(name) = path.strip_prefix(&prefix).and_then(|r| r.strip_suffix(".vsnd_c")).filter(|r| !r.contains('/')) else { continue };
         let data = pak.read(path)?;
-        // Почти все фразы — mp3; у немой Марси звуки несжатые — их сохраняем в wav.
-        if let Ok(mp3) = vsnd::mp3_of(&data) {
-            let file = out_dir.join(format!("{name}.mp3"));
-            std::fs::write(&file, mp3).with_context(|| trf!("не записывается {}", "can't write {}", file.display()))?;
-            n += 1;
-        } else if let Ok(pcm) = vsnd::pcm_of(&data) {
-            let file = out_dir.join(format!("{name}.wav"));
+        // Фразы почти все — mp3; звуки способностей и предметов (и Марси) — несжатые, в wav.
+        // Сначала PCM: его описание проверяется строго, а mp3 узнаётся по началу потока —
+        // несжатый звук, начатый с тишины `FF FF`, похож на кадр mp3 (`ink_swell_cast`).
+        let (file, other) = (out_dir.join(format!("{name}.wav")), out_dir.join(format!("{name}.mp3")));
+        let written = if let Ok(pcm) = vsnd::pcm_of(&data) {
             write_wav(&file, &pcm).with_context(|| trf!("не записывается {}", "can't write {}", file.display()))?;
+            Some(other)
+        } else if let Ok(mp3) = vsnd::mp3_of(&data) {
+            std::fs::write(&other, mp3).with_context(|| trf!("не записывается {}", "can't write {}", other.display()))?;
+            Some(file)
+        } else {
+            None
+        };
+        // Прежняя распаковка могла положить тот же звук с другим расширением — иначе в списке два.
+        if let Some(stale) = written {
+            let _ = std::fs::remove_file(stale);
             n += 1;
         }
     }
-    ensure!(n > 0, trf!("в {} нет фраз героя ({vo})", "no hero lines in {} ({vo})", voice_pak.display()));
+    ensure!(n > 0, trf!("в {} нет звуков в {folder}", "no sounds in {folder} inside {}", pak_path.display()));
     std::fs::write(&marker, stamp)?;
     Ok(n)
 }
 
-/// Сколько моих фраз записано у каждого героя: mp3 в `export/sounds/vo/<папка>/`.
+/// Сколько моих фраз записано у каждой карточки (`Hero::card_key`): mp3 в
+/// `export/sounds/vo/<папка>/`, фразы личности и автоматона — отдельно.
 pub fn recorded_counts(export_root: &Path) -> HashMap<String, usize> {
-    let Ok(dirs) = std::fs::read_dir(export_root.join("sounds/vo")) else { return HashMap::new() };
-    dirs.filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| Some((e.file_name().to_str()?.to_owned(), count_mp3(&e.path()))))
-        .collect()
-}
-
-/// Мои фразы в «Моих фразах» — всегда mp3.
-fn count_mp3(dir: &Path) -> usize {
-    count_files(dir, &["mp3"])
+    let mut counts = HashMap::new();
+    let Ok(dirs) = std::fs::read_dir(export_root.join("sounds/vo")) else { return counts };
+    for dir in dirs.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+        let Some(folder) = dir.file_name().to_str().map(str::to_owned) else { continue };
+        let Ok(files) = std::fs::read_dir(dir.path()) else { continue };
+        for f in files.filter_map(|e| e.ok()).map(|e| e.path()) {
+            if f.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp3"))
+                && let Some(name) = f.file_stem().and_then(|s| s.to_str())
+            {
+                *counts.entry(voice::card_of(&folder, &name.to_ascii_lowercase())).or_default() += 1;
+            }
+        }
+    }
+    counts
 }
 
 /// Сколько оригиналов уже распаковано: mp3, у Марси — wav.
@@ -264,10 +377,12 @@ pub fn png_of(vtex: &[u8]) -> Option<&[u8]> {
     vtex.get(start..end)
 }
 
-/// Текстура DXT5 из `.vtex_c`: (ширина, высота, RGBA). Размеры и формат — из блока DATA,
-/// пиксели самой крупной мип-карты лежат в конце файла.
-pub fn dxt5_of(vtex: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+/// Текстура из `.vtex_c`: (ширина, высота, RGBA). DXT5 — портреты новых героев и
+/// большинство иконок, несжатый BGRA8888 — часть иконок предметов. Размеры и формат —
+/// из блока DATA, пиксели самой крупной мип-карты лежат в конце файла.
+pub fn texture_of(vtex: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     const DXT5: u8 = 2;
+    const BGRA8888: u8 = 28;
     let u32_at = |at: usize| vtex.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
     let table = 8 + u32_at(8)? as usize;
     let data = (0..u32_at(12)? as usize).find_map(|i| {
@@ -276,8 +391,13 @@ pub fn dxt5_of(vtex: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     })?;
     let info = vtex.get(data + 20..data + 28)?;
     let (w, h) = (u16::from_le_bytes([info[0], info[1]]) as usize, u16::from_le_bytes([info[2], info[3]]) as usize);
-    if info[6] != DXT5 || w == 0 || h == 0 || w > 4096 || h > 4096 {
+    if ![DXT5, BGRA8888].contains(&info[6]) || w == 0 || h == 0 || w > 4096 || h > 4096 {
         return None;
+    }
+    if info[6] == BGRA8888 {
+        let pixels = vtex.get(vtex.len().checked_sub(w * h * 4)?..)?;
+        let rgba = pixels.as_chunks::<4>().0.iter().flat_map(|&[b, g, r, a]| [r, g, b, a]).collect();
+        return Some((w as u32, h as u32, rgba));
     }
     let (bw, bh) = (w.div_ceil(4), h.div_ceil(4));
     let pixels_at = vtex.len().checked_sub(bw * bh * 16)?;
@@ -378,7 +498,7 @@ fn upscale2x(w: usize, h: usize, rgba: &[u8]) -> (usize, usize, Vec<u8>) {
     (nw, nh, out)
 }
 
-fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
+pub(crate) fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut enc = png::Encoder::new(file, w, h);
     enc.set_color(png::ColorType::Rgba);
@@ -407,6 +527,25 @@ mod tests {
 
     fn hero_script(voice: &str, enabled: &str) -> Vec<u8> {
         format!("\"DOTAHeroes\"\n{{\n\t\"npc_dota_hero_x\"\n\t{{\n\t\t\"Enabled\"\t\t\"{enabled}\"\n\t\t\"VoiceFile\"\t\t\"soundevents/voscripts/game_sounds_vo_{voice}.vsndevts\"\n\t}}\n}}\n").into_bytes()
+    }
+
+    /// Несжатый звук как у старых ресурсов: DATA на 48 байт (частота, тип 0, каналы, сэмплы, размер).
+    fn pcm_vsnd(samples: &[i16]) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(&76u32.to_le_bytes());
+        f.extend_from_slice(&[12, 0, 1, 0]);
+        f.extend_from_slice(&8u32.to_le_bytes());
+        f.extend_from_slice(&1u32.to_le_bytes());
+        f.extend_from_slice(b"DATA");
+        f.extend_from_slice(&8u32.to_le_bytes());
+        f.extend_from_slice(&48u32.to_le_bytes());
+        let mut data = [0u8; 48];
+        data[..4].copy_from_slice(&[0x44, 0xAC, 0, 1]);
+        data[8..12].copy_from_slice(&(samples.len() as u32).to_le_bytes());
+        data[28..32].copy_from_slice(&(samples.len() as u32 * 2).to_le_bytes());
+        f.extend_from_slice(&data);
+        f.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+        f
     }
 
     fn vsnd(seed: u8) -> Vec<u8> {
@@ -438,6 +577,9 @@ mod tests {
         // Lina есть только в английской озвучке основного пака.
         main.add("sounds/vo/lina/lina_kill_01.vsnd_c", vsnd(3)).unwrap();
         main.add("sounds/vo/axe/axe_kill_01.vsnd_c", vsnd(4)).unwrap();
+        // Автоматон и набор Акса — только в английской озвучке.
+        main.add("sounds/vo/axe/auto_axe_kill_01.vsnd_c", vsnd(5)).unwrap();
+        main.add("sounds/vo/axe/jung_axe_kill_01.vsnd_c", vsnd(6)).unwrap();
         let main_pak = root.join("pak01_dir.vpk");
         std::fs::write(&main_pak, main.write()).unwrap();
 
@@ -452,12 +594,15 @@ mod tests {
         std::fs::write(&voice_pak, voice.write()).unwrap();
 
         let cache = root.join("cache");
-        let heroes = load_or_scan(&main_pak, &voice_pak, "russian", &cache).unwrap();
+        let heroes = load_or_scan(&main_pak, &voice_pak, "russian", &cache).unwrap().heroes;
         let brief: Vec<_> = heroes.iter().map(|h| (h.id.as_str(), h.vo.as_str(), h.name.as_str(), h.lines, h.english_only)).collect();
+        // У Акса две фразы на языке и набор из английской; автоматон — своя карточка.
+        let auto = format!("Axe ({})", Variant::Automaton.label());
         assert_eq!(
             brief,
             [
-                ("axe", "axe", "Axe", 2, false),
+                ("axe", "axe", "Axe", 3, false),
+                ("axe_carnival", "axe", auto.as_str(), 1, true),
                 ("crystal_maiden", "crystalmaiden", "Crystal Maiden", 1, false),
                 ("lina", "lina", "Lina", 1, true),
             ]
@@ -468,7 +613,7 @@ mod tests {
         let modified = std::fs::metadata(&main_pak).unwrap().modified().unwrap();
         std::fs::write(&main_pak, b"broken").unwrap();
         std::fs::File::options().write(true).open(&main_pak).unwrap().set_modified(modified).unwrap();
-        assert_eq!(load_or_scan(&main_pak, &voice_pak, "russian", &cache).unwrap(), heroes);
+        assert_eq!(load_or_scan(&main_pak, &voice_pak, "russian", &cache).unwrap().heroes, heroes);
 
         let out = root.join("originals/sounds/vo/axe");
         assert_eq!(extract_lines(&voice_pak, "axe", &out).unwrap(), 2);
@@ -477,9 +622,22 @@ mod tests {
         assert_eq!(extract_lines(&voice_pak, "axe", &out).unwrap(), 2, "повторно — из готовых файлов");
         assert!(extract_lines(&voice_pak, "nobody", &root.join("none")).is_err());
 
+        // Несжатый звук, начатый с `FF FF` (как `ink_swell_cast`), — в wav, старый «mp3» убирается.
+        let mut sfx = VpkBuilder::default();
+        sfx.add("sounds/weapons/hero/x/quiet.vsnd_c", pcm_vsnd(&[-1, -1, 300, -400])).unwrap();
+        let sfx_pak = root.join("sfx_dir.vpk");
+        std::fs::write(&sfx_pak, sfx.write()).unwrap();
+        let sfx_out = root.join("originals/sfx");
+        std::fs::create_dir_all(&sfx_out).unwrap();
+        std::fs::write(sfx_out.join("quiet.mp3"), b"old").unwrap();
+        assert_eq!(extract_folder(&sfx_pak, "sounds/weapons/hero/x", &sfx_out).unwrap(), 1);
+        assert!(sfx_out.join("quiet.wav").is_file() && !sfx_out.join("quiet.mp3").exists());
+
         std::fs::create_dir_all(root.join("export/sounds/vo/axe")).unwrap();
         std::fs::write(root.join("export/sounds/vo/axe/axe_kill_01.mp3"), b"x").unwrap();
-        assert_eq!(recorded_counts(&root.join("export")).get("axe"), Some(&1));
+        std::fs::write(root.join("export/sounds/vo/axe/auto_axe_kill_01.mp3"), b"x").unwrap();
+        let counts = recorded_counts(&root.join("export"));
+        assert_eq!((counts.get("axe"), counts.get("axe:automaton")), (Some(&1), Some(&1)));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -522,7 +680,7 @@ mod tests {
         block.extend_from_slice(&0x001Fu16.to_le_bytes());
         block.extend_from_slice(&0b01_11_10_00_01_11_10_00_01_11_10_00_01_11_10_00u32.to_le_bytes());
         vtex.extend_from_slice(&block);
-        let (w, h, rgba) = dxt5_of(&vtex).unwrap();
+        let (w, h, rgba) = texture_of(&vtex).unwrap();
         assert_eq!((w, h), (4, 4));
         assert_eq!(&rgba[0..4], &[255, 0, 0, 255], "левый верхний — красный, непрозрачный");
         assert_eq!(&rgba[4..8], &[170, 0, 85, 255], "2/3 красного + 1/3 синего");

@@ -4,6 +4,7 @@
 
 mod build;
 mod heroes;
+mod items;
 mod loudness;
 mod record;
 mod settings;
@@ -20,7 +21,7 @@ use dota_revoice::audio::{self, Clip, Player, Recorder, Track};
 use dota_revoice::{encode, install, update};
 use dota_revoice::process::{self, Settings};
 use dota_revoice::game::{self, DotaInstall};
-use dota_revoice::project::{self, Line, Project, Status, Take};
+use dota_revoice::project::{self, Line, Project, Status, Take, View};
 use eframe::egui::{self, Align, Key, Modifiers, RichText};
 
 use crate::config::{Config, PreRoll};
@@ -42,6 +43,7 @@ const MIN_TRIM_SAMPLES: usize = audio::RATE as usize / 10;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Heroes,
+    Items,
     Record,
     Build,
     Settings,
@@ -138,6 +140,7 @@ pub struct App {
     build: BuildState,
     settings: SettingsState,
     heroes: HeroesState,
+    items: items::ItemsState,
     share: share::ShareState,
 }
 
@@ -182,6 +185,7 @@ impl App {
             build: BuildState::default(),
             settings: SettingsState::default(),
             heroes: HeroesState::default(),
+            items: items::ItemsState::default(),
             share: share::ShareState::default(),
             config,
         };
@@ -194,9 +198,7 @@ impl App {
             app.start_update_check(&cc.egui_ctx);
         }
         app.migrate_old_config();
-        if let Some(folder) = app.config.last_folder.clone().filter(|f| f.is_dir()) {
-            app.open_project(&folder);
-        }
+        app.reopen_last();
         if app.project.is_none() {
             app.screen = Screen::Heroes;
         }
@@ -242,35 +244,89 @@ impl App {
         }
     }
 
+    /// Своя папка: все её фразы, без карточки героя.
     fn open_project(&mut self, folder: &Path) {
-        match Project::open_in(folder, &self.config.export_root()) {
-            Ok(p) => {
-                let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-                for (i, line) in p.lines.iter().enumerate() {
-                    match groups.iter_mut().find(|(c, _)| *c == line.category) {
-                        Some((_, idx)) => idx.push(i),
-                        None => groups.push((line.category.clone(), vec![i])),
-                    }
+        self.open_project_view(folder, None, View::All, None);
+    }
+
+    /// Открыть то же, что в прошлый раз (при запуске, после переноса «Моих фраз»).
+    fn reopen_last(&mut self) {
+        let Some(folder) = self.config.last_folder.clone().filter(|f| f.is_dir()) else { return };
+        let english = self.config.last_english.clone().filter(|d| d.is_dir());
+        self.open_project_view(&folder, english.as_deref(), self.config.last_view, self.config.last_card.clone());
+    }
+
+    /// Фразы или звуки из `folder`: `view` — чьи (герой, личность, автоматон), `english` —
+    /// та же папка в английской озвучке (арканы и наборы), `card` — с какой карточки открыли.
+    fn open_project_view(&mut self, folder: &Path, english: Option<&Path>, view: View, card: Option<String>) {
+        match Project::open_view(folder, english, &self.config.export_root(), view) {
+            Ok(mut p) => {
+                // Звуки способностей и предметов — по группам из каталога игры.
+                if p.is_sounds()
+                    && let Some(set) = self.sound_set_for(&p.resource_dir).cloned()
+                {
+                    p.apply_sound_set(&set, view);
                 }
-                // Обычные фразы героя — сверху, вторые версии и прочие группы — после них.
-                groups.sort_by_key(|(c, _)| c.contains('/'));
-                self.info(trf!(
-                    "Открыт {}: {} фраз, записано {}. Свои фразы сохраняются в {}", "Opened {}: {} lines, {} recorded. Your lines are saved to {}",
-                    self.hero_name(&p.hero),
-                    p.lines.len(),
-                    p.recorded_count(),
-                    p.export_root.join(&p.resource_dir).display()
-                ));
-                self.groups = groups;
-                self.collapsed.clear();
+                let saved_to = p.export_root.join(&p.resource_dir);
+                let (count, recorded) = (p.lines.len(), p.recorded_count());
                 self.project = Some(p);
-                self.build = BuildState::default();
                 self.config.last_folder = Some(folder.to_path_buf());
+                self.config.last_view = view;
+                self.config.last_english = english.map(Path::to_path_buf);
+                self.config.last_card = card;
                 self.config.save();
+                self.rebuild_groups();
+                self.info(trf!(
+                    "Открыто: {} — {} звуков, записано {}. Свои версии сохраняются в {}",
+                    "Opened: {} — {} sounds, {} recorded. Your versions are saved to {}",
+                    self.project_title(),
+                    count,
+                    recorded,
+                    saved_to.display()
+                ));
+                self.collapsed.clear();
+                self.build = BuildState::default();
                 let first = self.visible_order().first().copied().unwrap_or(0);
                 self.select(first);
             }
             Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+
+    /// Группы списка в порядке показа: фразы — основные, потом арканы и наборы по разделам;
+    /// звуки — как способности героя (Q, W, E, R…) или предметы по алфавиту.
+    fn rebuild_groups(&mut self) {
+        let Some(p) = &self.project else { return };
+        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        for (i, line) in p.lines.iter().enumerate() {
+            match groups.iter_mut().find(|(c, _)| *c == line.category) {
+                Some((_, idx)) => idx.push(i),
+                None => groups.push((line.category.clone(), vec![i])),
+            }
+        }
+        groups.sort_by_key(|(c, _)| (p.group_rank(c), project::section_of(c).map(str::to_owned)));
+        self.groups = groups;
+    }
+
+    /// Встать на первый звук группы (предмет, на который нажали во вкладке «Предметы»).
+    /// `false` — в открытом таких звуков нет.
+    fn select_group(&mut self, group: &str) -> bool {
+        let Some(first) = self.groups.iter().find(|(c, _)| c == group).and_then(|(_, idx)| idx.first().copied()) else { return false };
+        self.collapsed.remove(group);
+        self.select(first);
+        true
+    }
+
+    /// Что открыто: «Axe», «Axe · способности», «Предметы».
+    pub(super) fn project_title(&self) -> String {
+        let Some(p) = &self.project else { return String::new() };
+        if p.resource_dir == dota_revoice::sfx::ITEM_SOUNDS {
+            return tr!("Предметы", "Items").to_owned();
+        }
+        match (self.project_hero(), p.is_sounds()) {
+            (Some(h), true) => trf!("{} · способности", "{} · abilities", h.name),
+            (Some(h), false) => h.name.clone(),
+            (None, _) => self.hero_name(&p.hero),
         }
     }
 
@@ -528,13 +584,16 @@ impl App {
         }
     }
 
-    /// Подходит ли фраза под поиск: имя, категория или заметка.
+    /// Подходит ли фраза под поиск: имя, категория или заметка. Арканы и наборы — если не скрыты.
     fn matches(&self, i: usize, query: &str) -> bool {
         let Some(p) = &self.project else { return false };
         let line = &p.lines[i];
+        if line.skin.is_some() && !self.config.show_skins {
+            return false;
+        }
         query.is_empty()
             || line.name.contains(query)
-            || project::category_label(&line.category).to_lowercase().contains(query)
+            || p.category_label(&line.category).to_lowercase().contains(query)
             || p.note(line).to_lowercase().contains(query)
     }
 
@@ -722,8 +781,10 @@ impl App {
         self.fx = Settings { denoise: self.config.denoise_new, ..Settings::default() };
         self.trim = (0, len);
         self.render_full();
-        // Тишину ищем уже после шумодава — так границы точнее.
-        if self.config.auto_trim
+        // Тишину ищем уже после шумодава — так границы точнее. У звуков способностей
+        // и предметов по умолчанию не режем: хвост и эхо эффекта — часть звука.
+        let auto_trim = if self.project.as_ref().is_some_and(|p| p.is_sounds()) { self.config.auto_trim_sfx } else { self.config.auto_trim };
+        if auto_trim
             && let Some(full) = &self.mine_full
         {
             self.trim = audio::detect_voice(&full.samples).unwrap_or((0, len));
@@ -842,13 +903,23 @@ impl App {
             ui.add_space(10.0);
 
             if let Some(p) = &self.project {
-                let text = format!("{}  ·  {}/{}", self.hero_name(&p.hero), p.recorded_count(), p.lines.len());
+                // Что открыто: фразы героя, его способности или предметы.
+                let items = p.resource_dir == dota_revoice::sfx::ITEM_SOUNDS;
+                let glyph = match p.view {
+                    _ if items => icon::BACKPACK,
+                    _ if p.is_sounds() => icon::LIGHTNING,
+                    View::Variant(dota_revoice::voice::Variant::Persona) => icon::MASK_HAPPY,
+                    View::Variant(dota_revoice::voice::Variant::Automaton) => icon::ROBOT,
+                    _ => icon::CHAT_TEXT,
+                };
+                let text = format!("{glyph}  {}  ·  {}/{}", self.project_title(), p.recorded_count(), p.lines.len());
                 let chip = egui::Button::new(RichText::new(text).color(theme::TEXT)).corner_radius(99);
-                // На «Героях» чип ведёт обратно к записи этого героя, с остальных вкладок — к списку.
-                let (target, hint) = if self.screen == Screen::Heroes {
-                    (Screen::Record, tr!("К фразам героя", "To the hero's lines"))
-                } else {
-                    (Screen::Heroes, tr!("К списку героев", "Back to the hero list"))
+                // На списке (герои, предметы) чип ведёт к «Записи», с остальных вкладок — к своему списку.
+                let list = if items { Screen::Items } else { Screen::Heroes };
+                let (target, hint) = match self.screen {
+                    Screen::Heroes | Screen::Items => (Screen::Record, tr!("К записи", "To recording")),
+                    _ if items => (list, tr!("К списку предметов", "Back to the item list")),
+                    _ => (list, tr!("К списку героев", "Back to the hero list")),
                 };
                 if ui.add(chip).on_hover_text(hint).clicked() {
                     self.screen = target;
@@ -862,11 +933,16 @@ impl App {
             ui.add_space(gap.max(10.0));
             let tabs = egui::Frame::default().fill(theme::BG).corner_radius(10).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for (screen, label) in [(Screen::Heroes, tr!("Герои", "Heroes")), (Screen::Record, tr!("Запись", "Record")), (Screen::Build, tr!("Сборка и установка", "Build & install"))] {
+                for (screen, label) in [
+                    (Screen::Heroes, tr!("Герои", "Heroes")),
+                    (Screen::Items, tr!("Предметы", "Items")),
+                    (Screen::Record, tr!("Запись", "Record")),
+                    (Screen::Build, tr!("Сборка и установка", "Build & install")),
+                ] {
                     let on = self.screen == screen;
                     let text = RichText::new(label).color(if on { theme::TEXT } else { theme::MUTED });
                     let btn = egui::Button::new(text).fill(if on { theme::CARD } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::NONE).corner_radius(8);
-                    let enabled = screen == Screen::Heroes || self.project.is_some();
+                    let enabled = matches!(screen, Screen::Heroes | Screen::Items) || self.project.is_some();
                     if ui.add_enabled(enabled, btn).clicked() && !on {
                         self.screen = screen;
                         if screen == Screen::Build {
@@ -1085,6 +1161,11 @@ impl eframe::App for App {
                     .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 18)))
                     .show(ctx, |ui| self.heroes_screen(ui));
             }
+            Screen::Items => {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 18)))
+                    .show(ctx, |ui| self.items_screen(ui));
+            }
             Screen::Build | Screen::Settings => {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(22, 18)))
@@ -1126,11 +1207,6 @@ fn secs_to_index(secs: f32, len: usize) -> usize {
 
 fn index_to_secs(index: usize) -> f32 {
     index as f32 / audio::RATE as f32
-}
-
-/// `bount_kill_01` → `bount`: в списке показываем имя без префикса героя.
-fn prefix_of(name: &str) -> &str {
-    name.split_once('_').map_or("", |(p, _)| p)
 }
 
 /// Дота по настройкам: своя папка игры и выбранный язык озвучки.

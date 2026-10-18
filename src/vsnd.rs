@@ -110,11 +110,11 @@ fn build_redi(resource_path: &str, mp3_crc: u32) -> Vec<u8> {
     w.finish()
 }
 
-fn build_data(mp3: &Mp3Stream) -> [u8; DATA_SIZE] {
+fn build_data(mp3: &Mp3Stream, loop_start: i32) -> [u8; DATA_SIZE] {
     let info = MP3_INFO_BITS | (mp3.channels << 7) | (mp3.sample_rate << 14);
     let fields: [u32; 10] = [
         info,
-        0, // начало петли: у реплик 0, они не зацикливаются
+        loop_start as u32, // начало петли: у реплик 0, у звуков эффектов −1 (не зацикливать)
         mp3.sample_count(),
         mp3.duration_secs().to_bits(),
         0, // смещение блока фонем: нет
@@ -134,8 +134,14 @@ fn build_data(mp3: &Mp3Stream) -> [u8; DATA_SIZE] {
 /// `resource_path` — путь внутри игры без расширения,
 /// например `sounds/vo/bounty_hunter/bount_kill_01`.
 pub fn build(resource_path: &str, mp3: &Mp3Stream) -> Vec<u8> {
+    build_looped(resource_path, mp3, 0)
+}
+
+/// То же с заданным началом петли: −1 — играть один раз, 0 — зацикливать целиком.
+/// Звуки эффектов берут его у оригинала (`loop_start`).
+pub fn build_looped(resource_path: &str, mp3: &Mp3Stream, loop_start: i32) -> Vec<u8> {
     let redi = build_redi(resource_path, crc32fast::hash(&mp3.data));
-    let data = build_data(mp3);
+    let data = build_data(mp3, loop_start);
 
     let redi_pos = 16 + 2 * 12;
     let data_pos = redi_pos + redi.len();
@@ -177,25 +183,75 @@ pub struct Pcm {
     pub samples: Vec<i16>,
 }
 
-/// Достаёт несжатый звук — так в игре лежат реплики немого героя (Марси). В блоке DATA
-/// (68 байт): частота (u16), тип (0 — PCM 16 бит), число каналов, …, со смещения 28 —
-/// размер потока в байтах. Поток идёт сразу за заголовком ресурса.
+/// Достаёт несжатый звук (PCM 16 бит) — так лежат реплики немой Марси и почти все звуки
+/// способностей и предметов. Блок DATA бывает двух видов:
+/// - старый, 68 байт (Марси): частота (u16), тип (0 — PCM), число каналов;
+/// - нынешний, 40 байт, как у mp3: битовое поле — тип в битах 0–1 (1 — wav), разрядность
+///   в битах 2–6, каналы в битах 7–8, частота с бита 14.
+///
+/// В обоих со смещения 28 — размер потока в байтах; поток идёт сразу за заголовком.
+/// У новых ресурсов (RED2) DATA пустой, а описание звука — в блоке CTRL (`ctrl_pcm`).
 pub fn pcm_of(vsnd_c: &[u8]) -> anyhow::Result<Pcm> {
     let not_pcm = || anyhow::anyhow!(tr!("звук не в PCM 16 бит", "the sound isn't 16-bit PCM"));
     let header = u32_at(vsnd_c, 0).ok_or_else(not_pcm)? as usize;
-    let data = block(vsnd_c, b"DATA").filter(|d| d.len() >= 32).ok_or_else(not_pcm)?;
-    let sample_rate = u16::from_le_bytes([data[0], data[1]]) as u32;
-    let (kind, channels) = (data[2], data[3] as u16);
-    anyhow::ensure!(kind == 0 && (1..=2).contains(&channels) && sample_rate > 0, not_pcm());
+    let Some(data) = block(vsnd_c, b"DATA").filter(|d| d.len() >= 32) else {
+        let (sample_rate, channels) = ctrl_pcm(vsnd_c, header).ok_or_else(not_pcm)?;
+        let stream = vsnd_c.get(header..).ok_or_else(not_pcm)?;
+        let samples = stream.as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b)).collect();
+        return Ok(Pcm { sample_rate, channels, samples });
+    };
+    let (sample_rate, channels) = if data.len() == DATA_SIZE {
+        let bits = u32_at(data, 0).ok_or_else(not_pcm)?;
+        anyhow::ensure!(bits & 3 == 1 && (bits >> 2) & 31 == 16, not_pcm());
+        (bits >> 14, ((bits >> 7) & 3) as u16)
+    } else {
+        anyhow::ensure!(data[2] == 0, not_pcm());
+        (u16::from_le_bytes([data[0], data[1]]) as u32, data[3] as u16)
+    };
+    anyhow::ensure!((1..=2).contains(&channels) && sample_rate > 0, not_pcm());
     let size = u32_at(data, 28).ok_or_else(not_pcm)? as usize;
+    // В старом DATA со смещения 8 — число сэмплов: у PCM оно ровно сходится с размером
+    // потока (так у всех таких звуков игры), а mp3 за PCM не примешь.
+    if data.len() != DATA_SIZE {
+        let count = u32_at(data, 8).ok_or_else(not_pcm)? as usize;
+        anyhow::ensure!(count * channels as usize * 2 == size, not_pcm());
+    }
     let stream = vsnd_c.get(header..header + size).ok_or_else(|| anyhow::anyhow!(tr!("обрезанный звук", "truncated sound")))?;
     let samples = stream.as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b)).collect();
     Ok(Pcm { sample_rate, channels, samples })
 }
 
+/// Частота и каналы несжатого звука нового ресурса. CTRL — двоичный KV3 v5, сжатый LZ4;
+/// разбирать его целиком не нужно: в распакованных данных есть строка формата `PCM16`,
+/// частота (одно из обычных значений) и число сэмплов N, у которого N × каналы × 2 —
+/// ровно размер потока за заголовком. Так однозначно читаются все 387 таких звуков игры.
+fn ctrl_pcm(vsnd_c: &[u8], header: usize) -> Option<(u32, u16)> {
+    const RATES: [u32; 8] = [44100, 48000, 22050, 32000, 24000, 16000, 11025, 8000];
+    let kv = crate::kv3::decode(block(vsnd_c, b"CTRL")?)?.bytes();
+    if !kv.split(|&b| b == 0).any(|s| s == b"PCM16") {
+        return None;
+    }
+    let size = vsnd_c.len().checked_sub(header)?;
+    let ints: Vec<u32> = (0..kv.len().saturating_sub(3)).filter_map(|i| u32_at(&kv, i)).collect();
+    let rate = ints.iter().copied().find(|v| RATES.contains(v))?;
+    let fits = |ch: usize| ints.iter().any(|&n| n > 0 && n as usize * ch * 2 == size);
+    match (fits(1), fits(2)) {
+        (true, false) => Some((rate, 1)),
+        (false, true) => Some((rate, 2)),
+        _ => None,
+    }
+}
+
+/// Начало петли звука из игры: −1 — играет один раз, 0 и больше — зациклен.
+/// `None` — блока DATA нет (новые ресурсы хранят это в CTRL).
+pub fn loop_start(vsnd_c: &[u8]) -> Option<i32> {
+    let data = block(vsnd_c, b"DATA").filter(|d| d.len() >= 8)?;
+    Some(u32_at(data, 4)? as i32)
+}
+
 /// Блок ресурса по тегу: таблица блоков начинается со смещения из байт 8..12
 /// (от позиции 8), в ней по 12 байт — тег, смещение (от поля смещения) и размер.
-fn block<'a>(res: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
+pub(crate) fn block<'a>(res: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
     let table = 8 + u32_at(res, 8)? as usize;
     let count = u32_at(res, 12)? as usize;
     (0..count).find_map(|i| {
@@ -230,6 +286,7 @@ mod tests {
         f.extend_from_slice(&68u32.to_le_bytes());
         let mut data = [0u8; 68];
         data[..4].copy_from_slice(&[0x44, 0xAC, 0, 1]); // 44100 Гц, PCM16, моно
+        data[8..12].copy_from_slice(&4u32.to_le_bytes()); // 4 сэмпла
         data[28..32].copy_from_slice(&8u32.to_le_bytes());
         f.extend_from_slice(&data);
         assert_eq!(f.len(), 96);
@@ -241,6 +298,71 @@ mod tests {
         assert!(pcm_of(&f[..100]).is_err(), "обрезанный поток");
     }
 
+    /// Новый ресурс: DATA пустой, описание в CTRL (KV3 v5, LZ4 из одних литералов).
+    #[test]
+    fn pcm_out_of_red2_ctrl() {
+        let samples: [i16; 4] = [5, -6, 700, -800];
+        // Распакованное: строки, частота и число сэмплов (2 на канал — значит, стерео).
+        let mut kv = b"m_nFormat\0PCM16\0\0\0".to_vec();
+        kv.extend_from_slice(&44100u32.to_le_bytes());
+        kv.extend_from_slice(&2u32.to_le_bytes());
+        // LZ4: всё одним литералом (длина 15 + продолжение).
+        let mut lz = vec![0xF0, (kv.len() - 15) as u8];
+        lz.extend_from_slice(&kv);
+        let mut ctrl = vec![0x05, b'3', b'V', b'K'];
+        ctrl.resize(20, 0);
+        ctrl.extend_from_slice(&1u32.to_le_bytes()); // LZ4
+        ctrl.resize(48, 0);
+        ctrl.extend_from_slice(&(kv.len() as u32).to_le_bytes());
+        ctrl.extend_from_slice(&(lz.len() as u32).to_le_bytes());
+        ctrl.resize(72, 0);
+        ctrl.extend_from_slice(&lz);
+        // Ресурс: таблица из двух блоков (DATA пустой, CTRL), потом поток.
+        let header = 16 + 24 + ctrl.len();
+        let mut f = Vec::new();
+        f.extend_from_slice(&(header as u32).to_le_bytes());
+        f.extend_from_slice(&[12, 0, 5, 0]);
+        f.extend_from_slice(&8u32.to_le_bytes());
+        f.extend_from_slice(&2u32.to_le_bytes());
+        f.extend_from_slice(b"DATA");
+        f.extend_from_slice(&20u32.to_le_bytes()); // к концу таблицы, размер 0
+        f.extend_from_slice(&0u32.to_le_bytes());
+        f.extend_from_slice(b"CTRL");
+        f.extend_from_slice(&8u32.to_le_bytes()); // сразу за таблицей
+        f.extend_from_slice(&(ctrl.len() as u32).to_le_bytes());
+        f.extend_from_slice(&ctrl);
+        assert_eq!(f.len(), header);
+        f.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+        let pcm = pcm_of(&f).unwrap();
+        assert_eq!((pcm.sample_rate, pcm.channels), (44100, 2));
+        assert_eq!(pcm.samples, samples);
+    }
+
+    /// Как у звуков способностей: 40-байтный DATA с типом wav, стерео, 44100.
+    #[test]
+    fn pcm_out_of_current_vsnd() {
+        let samples: [i16; 4] = [1, -2, 300, -400];
+        let mut f = Vec::new();
+        f.extend_from_slice(&68u32.to_le_bytes());
+        f.extend_from_slice(&[12, 0, 1, 0]);
+        f.extend_from_slice(&8u32.to_le_bytes());
+        f.extend_from_slice(&1u32.to_le_bytes());
+        f.extend_from_slice(b"DATA");
+        f.extend_from_slice(&8u32.to_le_bytes());
+        f.extend_from_slice(&40u32.to_le_bytes());
+        let mut data = [0u8; 40];
+        data[..4].copy_from_slice(&0x2b11_1941u32.to_le_bytes()); // wav, 16 бит, стерео, 44100
+        data[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        data[28..32].copy_from_slice(&8u32.to_le_bytes());
+        f.extend_from_slice(&data);
+        assert_eq!(f.len(), 68);
+        f.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+        let pcm = pcm_of(&f).unwrap();
+        assert_eq!((pcm.sample_rate, pcm.channels), (44100, 2));
+        assert_eq!(pcm.samples, samples);
+        assert_eq!(loop_start(&f), Some(-1));
+    }
+
     #[test]
     fn mp3_back_out_of_vsnd() {
         let mut data = vec![0xFF, 0xFB, 0x50, 0xC4];
@@ -250,6 +372,8 @@ mod tests {
         assert_eq!(mp3_of(&f).unwrap(), mp3.data.as_slice());
         assert!(mp3_of(&f[..f.len() - 500]).is_err(), "без потока");
         assert!(pcm_of(&f).is_err(), "mp3 — не PCM");
+        assert_eq!(loop_start(&f), Some(0), "реплика не зациклена, но петля с начала");
+        assert_eq!(loop_start(&build_looped("sounds/items/cheese", &mp3, -1)), Some(-1));
     }
 
     fn u32_at(b: &[u8], at: usize) -> u32 {

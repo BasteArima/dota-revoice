@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     }
 
     let summary = match (overlay, base.as_deref()) {
-        (true, base) => pack::build_overlay(base.map(Path::new), &replacements, Path::new(out_path))?,
+        (true, base) => pack::build_overlay(base.map(Path::new), &replacements, Path::new(out_path), None)?,
         (false, base) => pack::build(base.map(Path::new), &replacements, Path::new(out_path), |_| {})?,
     };
     for p in &summary.not_in_base {

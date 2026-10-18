@@ -134,19 +134,23 @@ impl App {
         {
             self.build.summary = Some(match result {
                 Ok(s) => {
+                    // Звуков способностей и предметов в паке озвучки нет — они и не «не из этой озвучки».
+                    let voice_missing: Vec<&str> = s.not_in_base.iter().map(String::as_str).filter(|r| r.starts_with("sounds/vo/")).collect();
+                    let sounds = s.not_in_base.len() - voice_missing.len();
+                    let lines = s.replaced + voice_missing.len();
                     let mut text = trf!(
-                        "Собрано: твоих фраз {}, из озвучки игры {}, {:.1} МБ", "Built: {} of your lines, {} from the game's voice-over, {:.1} MB",
-                        s.replaced + s.not_in_base.len(),
+                        "Собрано: твоих фраз {lines}, звуков способностей и предметов {sounds}, из озвучки игры {}, {:.1} МБ",
+                        "Built: {lines} of your lines, {sounds} ability and item sounds, {} from the game's voice-over, {:.1} MB",
                         s.copied,
                         s.size_bytes as f64 / 1_048_576.0
                     );
-                    if !s.not_in_base.is_empty() {
+                    if !voice_missing.is_empty() {
                         // Обычно это герои без озвучки на этом языке: их фразы лягут поверх английских.
-                        let first: Vec<&str> = s.not_in_base.iter().take(3).map(String::as_str).collect();
-                        let more = if s.not_in_base.len() > 3 { " …" } else { "" };
+                        let first: Vec<&str> = voice_missing.iter().take(3).copied().collect();
+                        let more = if voice_missing.len() > 3 { " …" } else { "" };
                         text += &trf!(
                             ". Не из этой озвучки: {} ({}{more}) — у таких героев твои фразы заменят английские", ". Not from this voice-over: {} ({}{more}) — for these heroes your lines will replace the English ones",
-                            s.not_in_base.len(),
+                            voice_missing.len(),
                             first.join(", ")
                         );
                     }
@@ -197,13 +201,15 @@ impl App {
     fn start_build(&mut self, ctx: &egui::Context) {
         let (Some(p), Some(out)) = (&self.project, self.built_pak()) else { return };
         let base = self.dota.as_ref().and_then(install::valve_index).filter(|_| self.build.use_base);
+        // Основной пак — чтобы звуки способностей и предметов знали, зациклен ли оригинал.
+        let main_pak = self.dota.as_ref().map(|d| d.game_dir.join("dota").join("pak01_dir.vpk")).filter(|p| p.is_file());
         let progress = Arc::new(AtomicU32::new(0));
         let (tx, rx) = mpsc::channel();
         let export_root = p.export_root.clone();
         let (prog2, ctx2) = (progress.clone(), ctx.clone());
         std::thread::spawn(move || {
             // Свой pak01_dir.vpk: оглавление Valve + мои фразы — собирается за секунды.
-            let result = pack::collect_export(&export_root).and_then(|mine| pack::build_overlay(base.as_deref(), &mine, &out));
+            let result = pack::collect_export(&export_root).and_then(|mine| pack::build_overlay(base.as_deref(), &mine, &out, main_pak.as_deref()));
             if result.is_ok() {
                 // Полная копия озвучки от прежней версии программы больше не нужна.
                 let _ = std::fs::remove_file(out.with_file_name("pak02_dir.vpk"));
@@ -531,7 +537,7 @@ impl App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.add(theme::tool(trf!("{}  Экспорт пачки…", "{}  Export bundle…", icon::EXPORT))).on_hover_text(tr!("Выбери героев — их фразы и заметки уйдут в zip", "Pick heroes — their lines and notes go into a zip")).clicked() {
-                    self.open_export(None);
+                    self.open_export(&[]);
                 }
                 if ui.add(theme::tool(trf!("{}  Импорт пачки…", "{}  Import bundle…", icon::DOWNLOAD_SIMPLE))).on_hover_text(tr!("zip от друга; его можно и просто перетащить в окно", "A zip from a friend; you can also just drop it onto the window")).clicked() {
                     let ctx = ui.ctx().clone();

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use dota_revoice::i18n;
+use dota_revoice::project::View;
 use serde::{Deserialize, Serialize};
 use dota_revoice::tr;
 
@@ -12,6 +13,12 @@ pub struct Config {
     /// Мастер первого запуска пройден (или настройки перенесены со старой версии).
     pub setup_done: bool,
     pub last_folder: Option<PathBuf>,
+    /// Чьи фразы из `last_folder` были открыты: героя, личности, автоматона или все.
+    pub last_view: View,
+    /// Та же папка в английской озвучке (арканы и наборы оттуда).
+    pub last_english: Option<PathBuf>,
+    /// Карточка последнего открытого (id героя, личности или автоматона).
+    pub last_card: Option<String>,
     /// Папка `dota 2 beta`, если Дота стоит не там, где её находит Steam.
     pub dota_dir: Option<PathBuf>,
     /// Озвучку какого языка переделываем (`russian`); `None` — ту, что включена в игре.
@@ -29,6 +36,12 @@ pub struct Config {
     pub input_device: Option<String>,
     /// Сразу после записи или импорта обрезать тишину по краям.
     pub auto_trim: bool,
+    /// То же для звуков способностей и предметов (по умолчанию нет: хвост и эхо — часть звука).
+    pub auto_trim_sfx: bool,
+    /// Показывать фразы и звуки аркан и наборов.
+    pub show_skins: bool,
+    /// Показывать на «Героях» личности и автоматоны.
+    pub show_variants: bool,
     /// Сразу после записи подгонять громкость под оригинал.
     pub auto_level: bool,
     /// Включать шумодав для новых записей.
@@ -69,6 +82,9 @@ impl Default for Config {
         Self {
             setup_done: false,
             last_folder: None,
+            last_view: View::All,
+            last_english: None,
+            last_card: None,
             dota_dir: None,
             voice_language: None,
             library: None,
@@ -79,6 +95,9 @@ impl Default for Config {
             author: String::new(),
             input_device: None,
             auto_trim: true,
+            auto_trim_sfx: false,
+            show_skins: true,
+            show_variants: true,
             auto_level: true,
             denoise_new: false,
             pre_roll: PreRoll::Off,

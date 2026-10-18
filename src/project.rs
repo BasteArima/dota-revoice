@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use crate::voice::{self, Part, Skin, Variant};
 use crate::{tr, trf};
 
 pub const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac"];
@@ -27,9 +28,26 @@ const STATE_FILE: &str = "dota_revoice.json";
 pub struct Line {
     /// Имя файла без расширения: `bount_kill_01`.
     pub name: String,
-    /// `kill`, `ability_track`… — для группировки.
+    /// `kill`, `ability_track`… — для группировки; у звуков — способность или предмет.
+    /// Фразы арканы или набора — в своём разделе: `jung_axe/kill`.
     pub category: String,
     pub original: PathBuf,
+    /// Фраза или звук арканы или набора, а не базовые.
+    pub skin: Option<Skin>,
+    /// Как показать в списке: без начала героя (`kill_01` вместо `bount_kill_01`).
+    pub short: String,
+}
+
+/// Какие фразы папки героя открыть.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum View {
+    /// Все (своя папка): личность и автоматон — разделами.
+    #[default]
+    All,
+    /// Основной герой с арканами и наборами.
+    Hero,
+    /// Только личность или только автоматон.
+    Variant(Variant),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,9 +349,13 @@ pub struct Project {
     /// Каталог внутри игры: `sounds/vo/bounty_hunter`.
     pub resource_dir: String,
     pub hero: String,
+    /// Чьи фразы открыты (у звуков способностей — чьи звуки).
+    pub view: View,
     pub lines: Vec<Line>,
     recorded: HashSet<String>,
     store: Store,
+    /// Группы звуков способностей или предметов (`apply_sound_set`): подпись, иконка, порядок.
+    groups: Vec<crate::sfx::SoundGroup>,
 }
 
 impl Project {
@@ -342,33 +364,149 @@ impl Project {
         Self::open_in(source_dir, &legacy_export_root(source_dir))
     }
 
-    /// Свои фразы — в `export_root` (папка «Мои фразы» из настроек).
+    /// Свои фразы — в `export_root` (папка «Мои фразы» из настроек). Все фразы папки.
     pub fn open_in(source_dir: &Path, export_root: &Path) -> Result<Self> {
+        Self::open_view(source_dir, None, export_root, View::All)
+    }
+
+    /// Фразы героя, его личности или автоматона (`view`). `english_dir` — те же фразы
+    /// в английской озвучке: оттуда берутся арканы и наборы, которых нет в этом языке.
+    pub fn open_view(source_dir: &Path, english_dir: Option<&Path>, export_root: &Path, view: View) -> Result<Self> {
         let source_dir = source_dir.to_path_buf();
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&source_dir)
-            .with_context(|| trf!("не открывается папка {}", "can't open folder {}", source_dir.display()))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_file() && has_audio_ext(p))
-            .collect();
+        let mut files = audio_files(&source_dir)?;
         ensure!(!files.is_empty(), trf!("в папке {} нет звуков (mp3, wav, ogg…)", "no sounds in folder {} (mp3, wav, ogg…)", source_dir.display()));
-        files.sort();
 
         let (resource_dir, _) = locate(&source_dir);
         let export_root = export_root.to_path_buf();
         let hero = resource_dir.rsplit('/').next().unwrap_or_default().to_owned();
+        // Разбор по личностям, автоматонам и арканам — только у фраз героя.
+        let folder = resource_dir.strip_prefix("sounds/vo/").filter(|f| !f.contains('/')).map(str::to_owned);
+        if let (Some(folder), Some(english)) = (&folder, english_dir.filter(|d| *d != source_dir))
+            && view == View::Hero
+        {
+            let have: HashSet<String> = files.iter().map(|p| file_stem(p)).collect();
+            let skins = audio_files(english).unwrap_or_default().into_iter().filter(|p| {
+                let name = file_stem(p);
+                !have.contains(&name) && matches!(voice::split(folder, &name).0, Part::Skin { .. })
+            });
+            files.extend(skins.collect::<Vec<_>>());
+        }
+        files.sort_by_key(|p| file_stem(p));
 
-        let names: Vec<String> = files.iter().map(|p| file_stem(p)).collect();
-        let prefix = main_prefix(&names);
-        let lines = files
+        let parts: Vec<(PathBuf, String, Part)> = files
             .into_iter()
-            .zip(names)
-            .map(|(original, name)| Line { category: category(&name, &prefix), name, original })
+            .map(|p| {
+                let name = file_stem(&p);
+                let part = folder.as_deref().map_or(Part::Hero, |f| voice::split(f, &name).0);
+                (p, name, part)
+            })
+            // Звуки способностей делит по карточкам `apply_sound_set`, здесь — только фразы.
+            .filter(|(_, _, part)| match (view, part) {
+                _ if folder.is_none() => true,
+                (View::All, _) => true,
+                (View::Hero, Part::Variant(_)) => false,
+                (View::Hero, _) => true,
+                (View::Variant(v), Part::Variant(w)) => v == *w,
+                (View::Variant(_), _) => false,
+            })
             .collect();
+        let hero_names: Vec<String> = parts.iter().filter(|(_, _, part)| *part == Part::Hero).map(|(_, n, _)| n.clone()).collect();
+        let prefix = main_prefix(&hero_names);
+        let lines = parts
+            .into_iter()
+            .map(|(original, name, part)| {
+                let rest = folder.as_deref().map_or(name.as_str(), |f| voice::split(f, &name).1).to_owned();
+                let (category, skin, short) = match part {
+                    // У звуков способностей и предметов имя показываем целиком.
+                    Part::Hero if folder.is_none() => (category(&name, &prefix), None, name.clone()),
+                    Part::Hero => (category(&name, &prefix), None, strip_hero(&name, &prefix).to_owned()),
+                    Part::Skin { skin, section } => (format!("{section}/{}", without_number(&rest)), Some(skin), rest),
+                    Part::Variant(v) => {
+                        // У личности бывают подразделы (дракон Dragon Knight), во «всех» — раздел самой личности.
+                        let section = match view {
+                            View::All => Some(v.key()),
+                            _ => folder.as_deref().and_then(|f| voice::persona_section(f, &name)),
+                        };
+                        let base = without_number(&rest);
+                        (section.map_or_else(|| base.to_owned(), |s| format!("{s}/{base}")), None, rest)
+                    }
+                };
+                Line { category, original, skin, short, name }
+            })
+            .collect::<Vec<_>>();
+        ensure!(!lines.is_empty(), trf!("в папке {} нет фраз этой карточки", "no lines for this card in folder {}", source_dir.display()));
 
         let store = Store::open(&export_root);
-        let mut project = Self { source_dir, export_root, resource_dir, hero, lines, recorded: HashSet::new(), store };
+        let mut project = Self { source_dir, export_root, resource_dir, hero, view, lines, recorded: HashSet::new(), store, groups: Vec::new() };
         project.rescan();
         Ok(project)
+    }
+
+    /// Звуки способностей или предметов (а не фразы): папка не из `sounds/vo/`.
+    pub fn is_sounds(&self) -> bool {
+        !self.resource_dir.starts_with("sounds/vo/")
+    }
+
+    /// Раскладывает звуки по способностям или предметам из каталога игры. Звук, которого
+    /// в каталоге нет (своя папка, новый патч), — в «Прочее». `view` — чьи звуки оставить:
+    /// у личности и автоматона свои (`blink_in_persona`), остальные — у основного героя.
+    pub fn apply_sound_set(&mut self, set: &crate::sfx::SoundSet, view: View) {
+        let variant = |name: &str| set.file(name).and_then(|f| f.variant);
+        self.lines.retain(|l| match view {
+            View::All => true,
+            View::Hero => variant(&l.name).is_none(),
+            View::Variant(v) => variant(&l.name) == Some(v),
+        });
+        self.view = view;
+        for line in &mut self.lines {
+            line.short = line.name.clone();
+            match set.file(&line.name) {
+                Some(f) => {
+                    line.category = f.group.clone();
+                    line.skin = f.skin.then_some(Skin::Set);
+                }
+                None => {
+                    line.category = crate::sfx::OTHER.to_owned();
+                    line.skin = None;
+                }
+            }
+        }
+        self.rescan();
+        self.groups = set.groups.clone();
+        if !self.groups.iter().any(|g| g.key == crate::sfx::OTHER) && self.lines.iter().any(|l| l.category == crate::sfx::OTHER) {
+            self.groups.push(crate::sfx::SoundGroup { key: crate::sfx::OTHER.to_owned(), label: tr!("Прочее", "Other").to_owned(), icon: None });
+        }
+    }
+
+    /// Подпись группы: способность или предмет, у фраз — категория (с разделом:
+    /// «Набор Bare Knuckle · Убийства»).
+    pub fn category_label(&self, category: &str) -> String {
+        match self.groups.iter().find(|g| g.key == category) {
+            Some(g) => g.label.clone(),
+            None => category_label(category),
+        }
+    }
+
+    /// Подпись группы в списке: раздел там — свой заголовок, здесь только категория.
+    pub fn group_label(&self, category: &str) -> String {
+        match category.split_once('/') {
+            Some((_, base)) if self.groups.is_empty() => category_label(base),
+            _ => self.category_label(category),
+        }
+    }
+
+    /// Иконка группы в кеше (способности и предметы).
+    pub fn group_icon(&self, category: &str) -> Option<&str> {
+        self.groups.iter().find(|g| g.key == category)?.icon.as_deref()
+    }
+
+    /// Порядок групп: у звуков — как в каталоге (Q, W, E, R…), у фраз основные — раньше вторых версий.
+    pub fn group_rank(&self, category: &str) -> usize {
+        match self.groups.iter().position(|g| g.key == category) {
+            Some(i) => i,
+            None if self.groups.is_empty() => usize::from(category.contains('/')),
+            None => self.groups.len(),
+        }
     }
 
     /// Перечитать с диска: какие фразы записаны и состояние (после импорта пачки).
@@ -522,12 +660,19 @@ fn locate(source_dir: &Path) -> (String, PathBuf) {
     (format!("sounds/vo/{hero}"), root)
 }
 
-/// Префикс героя (`bount_`): самый частый первый кусок имени. `auto_` не в счёт —
-/// это вторые версии фраз (`auto_axe_kill_01`), а не другой герой.
+/// Звуки и фразы папки, по имени.
+fn audio_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    Ok(std::fs::read_dir(dir)
+        .with_context(|| trf!("не открывается папка {}", "can't open folder {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && has_audio_ext(p))
+        .collect())
+}
+
+/// Префикс героя (`bount_`): самый частый первый кусок имени.
 fn main_prefix(names: &[String]) -> String {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for n in names {
-        let n = n.strip_prefix("auto_").unwrap_or(n);
         if let Some((p, _)) = n.split_once('_') {
             *counts.entry(p).or_default() += 1;
         }
@@ -535,36 +680,37 @@ fn main_prefix(names: &[String]) -> String {
     counts.into_iter().max_by_key(|&(p, n)| (n, std::cmp::Reverse(p))).map(|(p, _)| format!("{p}_")).unwrap_or_default()
 }
 
-/// `bount_ability_track_kill_03` → `ability_track_kill`. Фразы с другим началом — в свои
-/// группы: `auto_axe_kill_01` → `auto/kill`, `jung_kill_01` → `jung/kill`.
-fn category(name: &str, prefix: &str) -> String {
-    let mut tags = Vec::new();
-    let mut rest = name;
-    if let Some(r) = rest.strip_prefix("auto_") {
-        tags.push("auto");
-        rest = r;
+/// Фраза без начала героя. Базовые фразы бывают и с другим началом (`dragon_` рядом
+/// с `drag_` у Dragon Knight) — у них снимается их первое слово.
+fn strip_hero<'a>(name: &'a str, prefix: &str) -> &'a str {
+    if prefix.is_empty() {
+        return name;
     }
-    if let Some(r) = rest.strip_prefix(prefix).filter(|_| !prefix.is_empty()) {
-        rest = r;
-    } else if !prefix.is_empty()
-        && let Some((tag, r)) = rest.split_once('_')
-    {
-        tags.push(tag);
-        rest = r;
-    }
-    // Хвост вида `_01` или `_12b` — номер варианта, в категорию не входит.
-    let base = match rest.rsplit_once('_') {
-        Some((head, tail)) if tail.starts_with(|c: char| c.is_ascii_digit()) => head,
+    name.strip_prefix(prefix).or_else(|| name.split_once('_').map(|(_, r)| r)).unwrap_or(name)
+}
+
+/// Хвост вида `_01`, `_12b` или `_03_02` — номер варианта, в категорию не входит.
+fn without_number(rest: &str) -> &str {
+    match rest.rsplit_once('_') {
+        Some((head, tail)) if tail.starts_with(|c: char| c.is_ascii_digit()) => without_number(head),
         _ => rest,
-    };
-    if tags.is_empty() { base.to_owned() } else { format!("{}/{base}", tags.join("/")) }
+    }
+}
+
+/// `bount_ability_track_kill_03` → `ability_track_kill`, `dragon_kill_01` → `kill`.
+fn category(name: &str, prefix: &str) -> String {
+    without_number(strip_hero(name, prefix)).to_owned()
+}
+
+/// Раздел группы фраз: `jung_axe/kill` → `jung_axe`.
+pub fn section_of(category: &str) -> Option<&str> {
+    category.split_once('/').map(|(s, _)| s)
 }
 
 /// Человеческое название категории.
 pub fn category_label(category: &str) -> String {
-    if let Some((tags, base)) = category.rsplit_once('/') {
-        let tags: Vec<&str> = tags.split('/').map(|t| if t == "auto" { tr!("Вторая версия", "Second version") } else { t }).collect();
-        return format!("{} · {}", tags.join(" · "), category_label(base));
+    if let Some((section, base)) = category.split_once('/') {
+        return format!("{} · {}", voice::section_label(section), category_label(base));
     }
     if let Some(ability) = category.strip_prefix("ability_") {
         return trf!("Способность: {ability}", "Ability: {ability}");
@@ -621,13 +767,54 @@ mod tests {
         assert_eq!(category("bount_kill_01", "bount_"), "kill");
         assert_eq!(category("bount_firstblood", "bount_"), "firstblood");
         assert_eq!(category("bount_rival_12b", "bount_"), "rival");
-        assert_eq!(category("auto_axe_ability_berserk_02", "axe_"), "auto/ability_berserk");
-        assert_eq!(category("jung_kill_01", "axe_"), "jung/kill");
-        assert_eq!(category_label("auto/kill"), "Вторая версия · Убийства");
+        assert_eq!(category("dk_ability_failure_03_02", "dk_"), "ability_failure");
+        // Базовая фраза с другим началом — та же категория.
+        assert_eq!(category("dragon_kill_01", "drag_"), "kill");
+        assert_eq!(category_label("jung_axe/kill"), "Набор Bare Knuckle · Убийства");
 
-        let names: Vec<String> =
-            ["auto_axe_kill_01", "auto_axe_kill_02", "axe_kill_01", "axe_kill_02", "jung_kill_01"].map(String::from).into();
+        let names: Vec<String> = ["axe_kill_01", "axe_kill_02", "jung_kill_01"].map(String::from).into();
         assert_eq!(main_prefix(&names), "axe_");
+    }
+
+    #[test]
+    fn hero_persona_automaton_and_skins() {
+        let root = std::env::temp_dir().join(format!("dota_revoice_views_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ru = root.join("russian/sounds/vo/axe");
+        let en = root.join("english/sounds/vo/axe");
+        std::fs::create_dir_all(&ru).unwrap();
+        std::fs::create_dir_all(&en).unwrap();
+        for n in ["axe_kill_01", "axe_kill_02"] {
+            std::fs::write(ru.join(format!("{n}.mp3")), b"x").unwrap();
+        }
+        for n in ["axe_kill_01", "axe_kill_02", "auto_axe_kill_01", "jung_axe_kill_01", "jung_axe_kill_02"] {
+            std::fs::write(en.join(format!("{n}.mp3")), b"x").unwrap();
+        }
+        let export = root.join("export");
+        let brief = |p: &Project| p.lines.iter().map(|l| (l.name.clone(), l.category.clone(), l.short.clone(), l.skin.is_some())).collect::<Vec<_>>();
+        let s = |a: &str, b: &str, c: &str, d: bool| (a.to_owned(), b.to_owned(), c.to_owned(), d);
+
+        // Герой на своём языке + набор из английской озвучки.
+        let hero = Project::open_view(&ru, Some(&en), &export, View::Hero).unwrap();
+        assert_eq!(
+            brief(&hero),
+            [
+                s("axe_kill_01", "kill", "kill_01", false),
+                s("axe_kill_02", "kill", "kill_02", false),
+                s("jung_axe_kill_01", "jung_axe/kill", "kill_01", true),
+                s("jung_axe_kill_02", "jung_axe/kill", "kill_02", true),
+            ]
+        );
+        assert_eq!(hero.group_label("jung_axe/kill"), "Убийства");
+        assert_eq!(hero.lines[2].original, en.join("jung_axe_kill_01.mp3"));
+
+        let auto = Project::open_view(&en, None, &export, View::Variant(Variant::Automaton)).unwrap();
+        assert_eq!(brief(&auto), [s("auto_axe_kill_01", "kill", "kill_01", false)]);
+        // Своя папка — всё вместе, автоматон отдельным разделом.
+        let all = Project::open_in(&en, &export).unwrap();
+        assert_eq!(all.lines.len(), 5);
+        assert!(all.lines.iter().any(|l| l.category == "automaton/kill"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

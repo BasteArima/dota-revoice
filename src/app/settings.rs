@@ -251,10 +251,12 @@ impl App {
 
     /// Свои фразы переехали — открытого героя перечитываем из новой папки.
     fn reopen_project(&mut self) {
-        let Some(folder) = self.project.as_ref().map(|p| p.source_dir.clone()) else { return };
+        if self.project.is_none() {
+            return;
+        }
         let selected = self.selected;
         let message = self.message.take();
-        self.open_project(&folder);
+        self.reopen_last();
         self.message = message;
         if self.project.as_ref().is_some_and(|p| selected < p.lines.len()) {
             self.select(selected);

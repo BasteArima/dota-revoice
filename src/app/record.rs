@@ -3,11 +3,12 @@
 use dota_revoice::audio::{self, Track};
 use dota_revoice::process;
 use dota_revoice::project::{self, Status};
+use dota_revoice::voice;
 use eframe::egui::{self, Align, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use super::theme::{self, AMBER, BG_DEEP, CARD_HOVER, FAINT, GOLD, GREEN, LINE, MUTED, ON_GOLD, RED, TEXT, WAVE, icon};
 use super::build::ago;
-use super::{App, Handle, MIN_TRIM_SAMPLES, Pending, TrimDrag, index_to_secs, prefix_of};
+use super::{App, Handle, MIN_TRIM_SAMPLES, Pending, TrimDrag, index_to_secs};
 use crate::config::PreRoll;
 use dota_revoice::{tr, trf};
 
@@ -15,11 +16,52 @@ const WAVE_HEIGHT: f32 = 62.0;
 
 impl App {
     pub(super) fn line_list(&mut self, ui: &mut egui::Ui) {
-        let Some(p) = &self.project else {
+        if self.project.is_none() {
             ui.add_space(8.0);
             ui.label(theme::small(tr!("Выбери героя на вкладке «Герои»", "Pick a hero on the Heroes tab")));
             return;
+        }
+        // Фразы героя или звуки его способностей — переключатель над списком.
+        if let Some(hero) = self.project_hero().cloned()
+            && hero.sound_count() > 0
+        {
+            let on_sounds = self.project.as_ref().is_some_and(|p| p.is_sounds());
+            let opening = self.heroes.opening_key() == Some(hero.card_key().as_str());
+            let mut switch = None;
+            egui::Frame::default().fill(BG_DEEP).corner_radius(10).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.horizontal(|ui| {
+                    let half = (ui.available_width() - 2.0) / 2.0;
+                    for (sounds_mode, text) in [
+                        (false, trf!("{}  Фразы {}", "{}  Lines {}", icon::CHAT_TEXT, hero.lines)),
+                        (true, trf!("{}  Способности {}", "{}  Abilities {}", icon::LIGHTNING, hero.sound_count())),
+                    ] {
+                        let on = sounds_mode == on_sounds;
+                        let label = RichText::new(text).size(12.5).color(if on { TEXT } else { MUTED });
+                        let btn = egui::Button::new(label).fill(if on { theme::CARD } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).corner_radius(8).min_size(vec2(half, 26.0));
+                        if ui.add_enabled(!opening, btn).clicked() && !on {
+                            switch = Some(sounds_mode);
+                        }
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            if let Some(sounds_mode) = switch {
+                let ctx = ui.ctx().clone();
+                let target = if sounds_mode { super::heroes::Target::Abilities(hero.clone()) } else { super::heroes::Target::Voice(hero.clone()) };
+                self.open_sounds(&ctx, target);
+            }
+        }
+        // Иконки способностей и предметов для заголовков групп — заранее, пока проект не занят.
+        let icon_ids: Vec<(String, String)> = match &self.project {
+            Some(p) => self.groups.iter().filter_map(|(c, _)| p.group_icon(c).map(|i| (c.clone(), i.to_owned()))).collect(),
+            None => Vec::new(),
         };
+        let ctx = ui.ctx().clone();
+        let icons: std::collections::HashMap<String, egui::TextureHandle> =
+            icon_ids.into_iter().filter_map(|(c, id)| self.icon_texture(&ctx, &id).map(|t| (c, t))).collect();
+        let Some(p) = &self.project else { return };
+        let is_sounds = p.is_sounds();
         egui::TopBottomPanel::bottom("legend").frame(egui::Frame::default()).show_inside(ui, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -32,15 +74,31 @@ impl App {
             });
         });
 
-        egui::Frame::default().fill(BG_DEEP).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(icon::MAGNIFYING_GLASS).color(MUTED));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .frame(false)
-                        .hint_text(RichText::new(tr!("Имя, категория или заметка", "Name, category or note")).color(FAINT))
-                        .desired_width(f32::INFINITY),
+        let mut toggle_skins = false;
+        ui.horizontal(|ui| {
+            // Чип «арканы и наборы»: снят — в списке только базовые фразы и звуки.
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                let hint = tr!(
+                    "Фразы и звуки аркан и наборов со своей озвучкой (они надеваются на героя). Сними, чтобы оставить только базовые",
+                    "Lines and sounds of arcanas and sets with their own voice-over (worn on the hero). Untick to keep only the base ones"
                 );
+                // Нет у этого героя ни аркан, ни наборов — нечего и прятать.
+                if p.lines.iter().any(|l| l.skin.is_some())
+                    && theme::chip(ui, self.config.show_skins, tr!("арканы и наборы", "arcanas and sets")).on_hover_text(hint).clicked()
+                {
+                    toggle_skins = true;
+                }
+                egui::Frame::default().fill(BG_DEEP).stroke(Stroke::new(1.0_f32, LINE)).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icon::MAGNIFYING_GLASS).color(MUTED));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.search)
+                                .frame(false)
+                                .hint_text(RichText::new(tr!("Имя, категория или заметка", "Name, category or note")).color(FAINT))
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
+                });
             });
         });
         ui.add_space(8.0);
@@ -62,18 +120,48 @@ impl App {
         let mut clicked = None;
         let mut toggle_group = None;
         let mut selected_rect = None;
+        // Разделы фраз (арканы, наборы, вид личности): ключ свёрнутого раздела в `collapsed`.
+        let section_key = |s: &str| format!("§{s}");
         let out = egui::ScrollArea::vertical().id_salt("lines").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
+            let mut section: Option<&str> = None;
             for (cat, idx) in &self.groups {
                 let shown: Vec<usize> = idx.iter().copied().filter(|&i| self.matches(i, &q)).collect();
                 if shown.is_empty() {
+                    continue;
+                }
+                let this = if is_sounds { None } else { project::section_of(cat) };
+                if this != section {
+                    section = this;
+                    if let Some(s) = this {
+                        // Сколько фраз в разделе и сколько из них записано — по всем его группам.
+                        let all: Vec<usize> = self
+                            .groups
+                            .iter()
+                            .filter(|(c, _)| project::section_of(c) == Some(s))
+                            .flat_map(|(_, idx)| idx.iter().copied())
+                            .filter(|&i| self.matches(i, &q))
+                            .collect();
+                        let rec = all.iter().filter(|&&i| p.status(&p.lines[i]) != Status::Empty).count();
+                        let open = !q.is_empty() || !self.collapsed.contains(&section_key(s));
+                        ui.add_space(10.0);
+                        if section_header(ui, &voice::section_label(s), rec, all.len(), open).clicked() {
+                            toggle_group = Some(section_key(s));
+                        }
+                    }
+                }
+                if let Some(s) = section
+                    && q.is_empty()
+                    && self.collapsed.contains(&section_key(s))
+                    && !(scroll && shown.contains(&self.selected))
+                {
                     continue;
                 }
                 let rec = shown.iter().filter(|&&i| p.status(&p.lines[i]) != Status::Empty).count();
                 // При поиске группы всегда раскрыты; выбранную фразу не прячем.
                 let open = !q.is_empty() || !self.collapsed.contains(cat) || (scroll && shown.contains(&self.selected));
                 ui.add_space(6.0);
-                if group_header(ui, &project::category_label(cat), rec, shown.len(), open).clicked() {
+                if group_header(ui, &p.group_label(cat), icons.get(cat), rec, shown.len(), open).clicked() {
                     toggle_group = Some(cat.clone());
                 }
                 if !open {
@@ -81,8 +169,11 @@ impl App {
                 }
                 for i in shown {
                     let line = &p.lines[i];
-                    let short = line.name.strip_prefix(&format!("{}_", prefix_of(&line.name))).unwrap_or(&line.name);
-                    let resp = list_row(ui, short, p.note(line), p.status(line), i == self.selected);
+                    let note = match (p.note(line), line.skin) {
+                        ("", Some(skin)) => skin.label(),
+                        (note, _) => note,
+                    };
+                    let resp = list_row(ui, &line.short, note, p.status(line), i == self.selected);
                     if resp.clicked() {
                         clicked = Some(i);
                     }
@@ -103,6 +194,10 @@ impl App {
             state.offset.y = (state.offset.y + r.center().y - out.inner_rect.center().y).clamp(0.0, max);
             state.store(ui.ctx(), out.id);
             ui.ctx().request_repaint();
+        }
+        if toggle_skins {
+            self.config.show_skins = !self.config.show_skins;
+            self.config.save();
         }
         if let Some(cat) = toggle_group
             && !self.collapsed.remove(&cat)
@@ -182,7 +277,7 @@ impl App {
         });
         let orig_secs = self.original.as_ref().map_or(0.0, |c| c.duration_secs());
         ui.horizontal(|ui| {
-            ui.label(theme::small(trf!("{} · {orig_secs:.1} с ·", "{} · {orig_secs:.1} s ·", project::category_label(&line.category))));
+            ui.label(theme::small(trf!("{} · {orig_secs:.1} с ·", "{} · {orig_secs:.1} s ·", self.project.as_ref().map(|p| p.category_label(&line.category)).unwrap_or_default())));
             ui.label(RichText::new(icon::PENCIL_SIMPLE).size(12.0).color(FAINT));
             // Заметка: тихая строка, которую можно поправить в любой момент.
             let resp = ui.add(
@@ -303,9 +398,11 @@ impl App {
                 // Высоту строки задаём до первой подписи — иначе она прилипает к верху.
                 ui.set_min_height(30.0);
                 ui.label(RichText::new(tr!("Новая запись:", "New recording:")).size(13.0).color(MUTED));
+                let sounds = self.project.as_ref().is_some_and(|p| p.is_sounds());
                 let mut changed = false;
                 for (value, text) in [
-                    (&mut self.config.auto_trim, tr!("убрать тишину", "trim silence")),
+                    // У звуков способностей и предметов — своя настройка: хвост и эхо там часть звука.
+                    (if sounds { &mut self.config.auto_trim_sfx } else { &mut self.config.auto_trim }, tr!("убрать тишину", "trim silence")),
                     (&mut self.config.auto_level, tr!("подогнать громкость", "match loudness")),
                     (&mut self.config.denoise_new, tr!("шумодав", "denoise")),
                 ] {
@@ -689,13 +786,37 @@ fn status_color(status: Status) -> Color32 {
 }
 
 /// Заголовок группы: стрелка, название, счётчик справа. Клик сворачивает группу.
-fn group_header(ui: &mut egui::Ui, label: &str, done: usize, total: usize, open: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+/// Заголовок раздела (аркана, набор, вид личности): над его группами, крупнее и с линией сверху.
+fn section_header(ui: &mut egui::Ui, label: &str, done: usize, total: usize, open: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
     let p = ui.painter();
+    p.hline(rect.x_range(), rect.top(), Stroke::new(1.0_f32, LINE));
+    let caret = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
+    let color = if resp.hovered() { GOLD } else { TEXT };
+    p.text(pos2(rect.left() + 4.0, rect.center().y + 2.0), Align2::LEFT_CENTER, caret, FontId::proportional(11.0), FAINT);
+    p.text(pos2(rect.left() + 18.0, rect.center().y + 2.0), Align2::LEFT_CENTER, label, FontId::new(12.5, theme::bold()), color);
+    p.text(pos2(rect.right() - 4.0, rect.center().y + 2.0), Align2::RIGHT_CENTER, format!("{done}/{total}"), FontId::proportional(11.0), MUTED);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn group_header(ui: &mut egui::Ui, label: &str, icon_tex: Option<&egui::TextureHandle>, done: usize, total: usize, open: bool) -> egui::Response {
+    let height = if icon_tex.is_some() { 26.0 } else { 22.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     let color = if resp.hovered() { TEXT } else { MUTED };
     let caret = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
-    p.text(pos2(rect.left() + 4.0, rect.center().y), Align2::LEFT_CENTER, caret, FontId::proportional(11.0), FAINT);
-    p.text(pos2(rect.left() + 18.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.0), color);
+    ui.painter().text(pos2(rect.left() + 4.0, rect.center().y), Align2::LEFT_CENTER, caret, FontId::proportional(11.0), FAINT);
+    // Иконка способности (квадратная) или предмета (88×64) — высотой в строку.
+    let mut x = rect.left() + 18.0;
+    if let Some(tex) = icon_tex {
+        let size = tex.size_vec2();
+        let h = 20.0;
+        let w = (h * size.x / size.y.max(1.0)).min(30.0);
+        let r = Rect::from_min_size(pos2(x, rect.center().y - h / 2.0), vec2(w, h));
+        egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex)).corner_radius(4).paint_at(ui, r);
+        x += w + 7.0;
+    }
+    let p = ui.painter();
+    p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.0), color);
     let count_color = if done == total { GREEN } else { FAINT };
     p.text(pos2(rect.right() - 6.0, rect.center().y), Align2::RIGHT_CENTER, format!("{done}/{total}"), FontId::proportional(11.0), count_color);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
