@@ -903,6 +903,36 @@ impl App {
         }
     }
 
+    /// Tab / Shift+Tab — следующая / предыдущая вкладка, как в шапке («Запись» и «Сборка» —
+    /// когда что-то открыто). Пока печатают в поле или открыто окно, Tab остаётся за ними.
+    fn switch_tabs(&mut self, ctx: &egui::Context) -> bool {
+        let busy = ctx.wants_keyboard_input() || ctx.memory(|m| m.top_modal_layer().is_some() || m.any_popup_open()) || self.updater.is_some();
+        if busy {
+            return false;
+        }
+        let back = ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Tab));
+        if !back && !ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
+            return false;
+        }
+        let mut tabs = vec![Screen::Heroes, Screen::Items];
+        if self.project.is_some() {
+            tabs.extend([Screen::Record, Screen::Build]);
+        }
+        let n = tabs.len();
+        // С настроек — на первую вкладку (или с конца, если назад).
+        let next = match (tabs.iter().position(|s| *s == self.screen), back) {
+            (Some(i), false) => (i + 1) % n,
+            (Some(i), true) => (i + n - 1) % n,
+            (None, false) => 0,
+            (None, true) => n - 1,
+        };
+        self.screen = tabs[next];
+        if self.screen == Screen::Build {
+            self.build.refresh_now();
+        }
+        true
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // Логотип: золотой квадрат с микрофоном.
@@ -953,7 +983,8 @@ impl App {
                     let text = RichText::new(label).color(if on { theme::TEXT } else { theme::MUTED });
                     let btn = egui::Button::new(text).fill(if on { theme::CARD } else { egui::Color32::TRANSPARENT }).stroke(egui::Stroke::NONE).corner_radius(8);
                     let enabled = matches!(screen, Screen::Heroes | Screen::Items) || self.project.is_some();
-                    if ui.add_enabled(enabled, btn).clicked() && !on {
+                    let tab = ui.add_enabled(enabled, btn).on_hover_text(tr!("Tab — следующая вкладка, Shift+Tab — предыдущая", "Tab — next tab, Shift+Tab — previous"));
+                    if tab.clicked() && !on {
                         self.screen = screen;
                         if screen == Screen::Build {
                             self.build.refresh_now();
@@ -1153,6 +1184,7 @@ impl eframe::App for App {
         }
         self.poll_heroes(ctx);
         self.handle_dropped(ctx);
+        let tab_switched = self.switch_tabs(ctx);
 
         let bar_frame = egui::Frame::side_top_panel(&ctx.style()).fill(PANEL).inner_margin(egui::Margin::symmetric(14, 10));
         egui::TopBottomPanel::top("top").frame(bar_frame).show(ctx, |ui| self.top_bar(ui));
@@ -1227,6 +1259,10 @@ impl eframe::App for App {
             || self.share.busy()
             || self.heroes.busy();
         ctx.request_repaint_after(if busy { Duration::from_millis(16) } else { Duration::from_millis(60) });
+        // Tab egui ещё и переводит фокус на первую кнопку — после смены вкладки он не нужен.
+        if tab_switched && let Some(id) = ctx.memory(|m| m.focused()) {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

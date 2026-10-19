@@ -426,7 +426,7 @@ impl App {
 
         ui.add_space(10.0);
         ui.vertical_centered(|ui| {
-            let hints = tr!("Space оригинал · Ctrl+Space моя · R запись · C сравнить · T убрать тишину · L громкость · ↑↓ фразы · N пустая · Esc отмена", "Space original · Ctrl+Space mine · R record · C compare · T trim silence · L loudness · ↑↓ lines · N next empty · Esc cancel");
+            let hints = tr!("Space оригинал · Ctrl+Space моя · R запись · C сравнить · T убрать тишину · L громкость · ↑↓ фразы · N пустая · Esc отмена · Tab вкладки", "Space original · Ctrl+Space mine · R record · C compare · T trim silence · L loudness · ↑↓ lines · N next empty · Esc cancel · Tab tabs");
             ui.label(RichText::new(hints).size(11.0).color(FAINT));
         });
     }

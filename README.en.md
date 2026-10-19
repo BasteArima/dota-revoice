@@ -129,6 +129,7 @@ the release page. What changed in each version is in [CHANGELOG.md](CHANGELOG.md
 | N | next unrecorded line |
 | Del | move my version to the trash |
 | Esc | cancel recording, stop playback |
+| Tab / Shift+Tab | next / previous tab (on any screen) |
 
 ### Share with friends
 
