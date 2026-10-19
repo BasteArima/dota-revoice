@@ -97,7 +97,10 @@ to keep your lines. By default that's the `library` folder next to the app on Wi
 "Documents/Dota Revoice" on macOS and Linux. All of this can be changed later in Settings
 (the gear at the top right), including the interface language.
 
-The app checks for new versions by itself: a "Version … is out" banner with a link appears at the top.
+The app checks for new versions by itself: a "Version … is out" banner with an **Update** button
+appears at the top. On Windows and Linux it downloads the new version, verifies it and restarts —
+your lines and settings stay in place. On macOS (or if the app's folder isn't writable) it links to
+the release page. What changed in each version is in [CHANGELOG.md](CHANGELOG.md) (in Russian).
 
 ## How to use
 

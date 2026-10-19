@@ -11,6 +11,7 @@ mod settings;
 mod share;
 mod setup;
 mod theme;
+mod updater;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -126,6 +127,12 @@ pub struct App {
     update: Option<update::Release>,
     /// Что ответил GitHub: `Some(None)` — у меня последняя версия, `None` — ещё не знаем.
     latest: Option<Option<update::Release>>,
+    /// Окно обновления: что нового, скачивание, перезапуск.
+    updater: Option<updater::Updater>,
+    /// Удаление прежней программы после обновления.
+    cleanup: updater::Cleanup,
+    /// С какой версии только что обновились — сказать на первом кадре.
+    updated_from: Option<String>,
     player: Option<Player>,
     recorder: Option<Recorder>,
     input_devices: Vec<String>,
@@ -173,6 +180,9 @@ impl App {
             game_checked: None,
             update_rx: None,
             latest: None,
+            updater: None,
+            cleanup: updater::Cleanup::default(),
+            updated_from: update::updated_from(),
             message_at: None,
             update: None,
             player: None,
@@ -991,16 +1001,34 @@ impl App {
         let Some(release) = self.update.clone() else { return };
         ui.horizontal(|ui| {
             ui.label(RichText::new(icon::SPARKLE).size(18.0).color(GOLD));
-            ui.label(RichText::new(trf!(
-                "Вышла новая версия {} (у тебя {}). Скачай её со страницы релиза и замени старую программу.", "Version {} is out (you have {}). Download it from the release page and replace the old app.",
-                release.version,
-                env!("CARGO_PKG_VERSION")
-            )).color(theme::TEXT));
+            let text = if release.installable {
+                trf!(
+                    "Вышла версия {} (у тебя {}) — обновится за полминуты, фразы и настройки останутся на месте.",
+                    "Version {} is out (you have {}) — it updates in half a minute, your lines and settings stay in place.",
+                    release.version,
+                    update::current_version()
+                )
+            } else {
+                trf!(
+                    "Вышла новая версия {} (у тебя {}). Скачай её со страницы релиза и замени старую программу.",
+                    "Version {} is out (you have {}). Download it from the release page and replace the old app.",
+                    release.version,
+                    update::current_version()
+                )
+            };
+            ui.label(RichText::new(text).color(theme::TEXT));
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 if theme::ghost(ui, true, icon::X).on_hover_text(tr!("Скрыть до следующего запуска", "Hide until next launch")).clicked() {
                     self.update = None;
                 }
-                if ui.add(theme::primary(trf!("{}  Скачать", "{}  Download", icon::DOWNLOAD_SIMPLE))).clicked() {
+                if release.installable {
+                    if ui.add(theme::primary(trf!("{}  Обновить", "{}  Update", icon::ARROWS_CLOCKWISE))).clicked() {
+                        self.open_updater(ui.ctx(), release.clone(), true);
+                    }
+                    if theme::ghost(ui, true, tr!("Что нового", "What's new")).clicked() {
+                        self.open_updater(ui.ctx(), release.clone(), false);
+                    }
+                } else if ui.add(theme::primary(trf!("{}  Скачать", "{}  Download", icon::DOWNLOAD_SIMPLE))).clicked() {
                     open_url(&release.url);
                 }
             });
@@ -1182,6 +1210,12 @@ impl eframe::App for App {
         }
 
         self.share_windows(ctx);
+        self.updater_window(ctx);
+        self.cleanup.tick();
+        // Только что обновились — сказать на первом кадре, когда окно уже видно.
+        if let Some(from) = self.updated_from.take() {
+            self.info(trf!("Обновлено: {from} → {}. Фразы и настройки на месте", "Updated: {from} → {}. Your lines and settings are in place", update::current_version()));
+        }
         self.toast(ctx);
 
         // Анимация волны, индикатора и кнопки записи; в покое — редкая перерисовка.

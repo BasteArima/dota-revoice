@@ -1,6 +1,8 @@
 # Релиз по тегу v*: zip с exe для Windows, универсальный .app для macOS, tar.gz для Linux.
 # Версия в теге должна совпадать с version в Cargo.toml — по ней программа
-# понимает, что вышло обновление.
+# понимает, что вышло обновление. Описание релиза — раздел версии из CHANGELOG.md:
+# его пункты программа показывает в окне обновления. Имена архивов не менять —
+# по ним программа находит свой (`update::asset`).
 name: Release
 
 on:
@@ -17,11 +19,12 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Версия тега совпадает с Cargo.toml
+      - name: Версия тега совпадает с Cargo.toml, в CHANGELOG.md есть её раздел
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           test "v$version" = "$GITHUB_REF_NAME" || { echo "тег $GITHUB_REF_NAME, а в Cargo.toml $version"; exit 1; }
+          grep -qx "## $version" CHANGELOG.md || { echo "в CHANGELOG.md нет раздела ## $version"; exit 1; }
       - name: Сборка
         run: cargo build --release --bin dota_revoice
       - name: Упаковка
@@ -96,14 +99,22 @@ jobs:
     needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
+      - name: Описание из CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '/^## /{on = ($2 == v); next} on' CHANGELOG.md > notes.md
+          cat notes.md
       - name: Релиз на GitHub
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Сначала наши пункты, после них GitHub допишет ссылку на изменения.
           gh release create "$GITHUB_REF_NAME" DotaRevoice-*.zip DotaRevoice-*.tar.gz \
             --repo "$GITHUB_REPOSITORY" \
             --title "Dota Revoice $GITHUB_REF_NAME" \
+            --notes-file notes.md \
             --generate-notes

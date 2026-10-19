@@ -343,7 +343,7 @@ impl App {
         theme::card(ui, |ui| {
             card_title(ui, icon::INFO, tr!("О программе", "About"));
             ui.horizontal(|ui| {
-                ui.label(theme::title(concat!("Dota Revoice ", env!("CARGO_PKG_VERSION")), 15.0));
+                ui.label(theme::title(format!("Dota Revoice {}", update::current_version()), 15.0));
                 ui.add_space(4.0);
                 match (&self.latest, self.update_rx.is_some()) {
                     (_, true) => {
@@ -352,7 +352,12 @@ impl App {
                     }
                     (Some(Some(release)), false) => {
                         theme::pill(ui, &trf!("вышла {}", "{} is out", release.version), GOLD);
-                        if ui.add(theme::primary(trf!("{}  Скачать", "{}  Download", icon::DOWNLOAD_SIMPLE))).clicked() {
+                        if release.installable {
+                            if ui.add(theme::primary(trf!("{}  Обновить", "{}  Update", icon::ARROWS_CLOCKWISE))).clicked() {
+                                let (ctx, release) = (ui.ctx().clone(), release.clone());
+                                self.open_updater(&ctx, release, true);
+                            }
+                        } else if ui.add(theme::primary(trf!("{}  Скачать", "{}  Download", icon::DOWNLOAD_SIMPLE))).clicked() {
                             open_url(&release.url);
                         }
                     }
