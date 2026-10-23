@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner.png" alt="Dota Revoice — re-voicing Dota 2 heroes" width="100%">
+  <img src="docs/banner.en.png" alt="Dota Revoice — re-voice any Dota 2 hero with your own voice" width="100%">
 </p>
 
 <p align="center">
